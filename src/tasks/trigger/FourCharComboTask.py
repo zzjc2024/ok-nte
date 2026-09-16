@@ -75,7 +75,6 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     COMBO_POLL_INTERVAL = 0.05
     COMBO_RELEASE_GAP = 0.06
     COMBO_CLICK_GAP = 0.05
-    ZANKOU_COMBO_START_DELAY = 1.5
     GOLD_THRESHOLD = 0.7
     DAFFODILL_FIELD_TIME = 1.5
     PAD_FIELD_TIME = 1.5
@@ -592,9 +591,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         else:
             logger.warning(f"zankou double q incomplete, animations={animations}")
         self._wait_in_team(timeout=self.CONTROLLABLE_TIMEOUT)
-        if self.ZANKOU_COMBO_START_DELAY > 0:
-            logger.info(f"zankou combo start delay {self.ZANKOU_COMBO_START_DELAY:.2f}s")
-            self.sleep(self.ZANKOU_COMBO_START_DELAY)
+        self._wait_cd_ticking()
 
     def _wait_in_team(self, timeout=2.0):
         """等脱离大招动画(is_in_team 恢复)."""
