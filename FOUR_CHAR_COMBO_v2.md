@@ -26,6 +26,10 @@
 6. 切**伊洛伊**：Q → 浮游炮。
 7. 切**残虹**二连 → 进入与达芙蒂尔互切（见 1.2 达芙蒂尔循环）。
 
+**中途脱战要中止**：开场序列期间 `check_combat` 被抑制（避免大招特写被误判脱战），所以每一步之间用 `_opener_combat_lost(tag)` 自己判断一次：`in_combat()` 连续为 False 达到 `OPENER_COMBAT_LOST_GRACE=2s` 就中止开场，并清掉 `_opener_gold_e_done` / `_precombat_daffodill_q_done`，让下一场战斗重新从金 E 开始。
+- 为什么需要：开场序列本身要 20~30s 且**没有** `in_combat()` 检查；如果第一个敌人金 E 后就死了，脚本会继续把达芙蒂尔 Q / 伊洛伊 E / 早雾 Q+E / 残虹双 Q / 浮游炮全部打完，而且因为开场记忆没清，第二个敌人出现时**不会再放金 E**。
+- 为什么不直接开 `check_combat`：`in_combat()` 在残虹双 Q 的连续特写里会短暂变 False，直接判定会把开场打断（旧 bug）。`in_combat()` 本身要连续丢失 Lv/target ~3.5s 才会返回 False，再加 2s 宽限，避免特写误判。
+
 ### 1.2 主循环（起点 = 伊洛伊）
 
 - **伊洛伊**：切到后先点 **E**；Q 可放 → Q + 浮游炮；不可放 → 垫刀（在伊洛伊身上打 `PAD_FIELD_TIME=1.5s` → 残虹二连 → 切回伊洛伊）重复直到 Q 可放。**浮游炮之后先切残虹二连，再切早雾**（`_zankou_combo_switch(self.sakiri)`）。
@@ -124,6 +128,7 @@
 | `check_combat` / `_suspend_combat_check` | 紧输入序列期间抑制战斗检测，避免特写误判脱战打断 |
 | `_run_rotation` | `_opener` → `while in_combat(): _loop_once` |
 | `_opener` / `_loop_once` | 1.1 开局 / 1.2 主循环一轮 |
+| `_opener_combat_lost` | 开场序列中途的脱战判断（带 `OPENER_COMBAT_LOST_GRACE` 宽限），脱战即中止并清开场记忆 |
 | `_zankou_fixed_step` | 早雾之后的残虹固定步骤（双 Q 只在这里），带 Q 状态诊断日志 |
 | `_daffodill_until_cycle_full` / `_daffodill_window` | 达芙蒂尔循环（1.5s 窗口 / Q 可用即走） |
 | `_pad_until_q` | 伊洛伊/早雾 Q 不可放时的垫刀；记录 `_pad_target` 供声音反击用 |
@@ -155,6 +160,7 @@ SKILL_REGISTER_TIMEOUT=2.0  DAFFODILL_SKILL_REGISTER_TIMEOUT=0.5
 CYCLE_BAR_VISIBLE_MIN_PIXELS=20  IROI_FUNNEL_ANIMATION_TIMEOUT=5.0
 CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
 ANIMATION_STABLE_TIME=0.3  CYCLE_STAY_RATIO=0.9  COMBAT_STATE_LOG_INTERVAL=2.0
+OPENER_COMBAT_LOST_GRACE=2.0
 SOUND_IMMEDIATE_SPAM_TIME=1.2  SOUND_SUCCESS_CLICK_DOWN=0.08  SOUND_SUCCESS_WAIT=0.18  SCRIPT_TICK=0.05
 ACTION_LOG_PATH=logs/four_combo_actions.log
 ```

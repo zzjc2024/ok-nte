@@ -101,6 +101,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     ANIMATION_STABLE_TIME = 0.3
     CYCLE_STAY_RATIO = 0.9
     COMBAT_STATE_LOG_INTERVAL = 2.0
+    OPENER_COMBAT_LOST_GRACE = 2.0
     SOUND_IMMEDIATE_SPAM_TIME = 1.2
     SOUND_SUCCESS_CLICK_DOWN = 0.08
     SOUND_SUCCESS_WAIT = 0.18
@@ -123,6 +124,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._pad_target = None
         self._alert_interrupt = threading.Event()
         self._combat_state_logged_at = 0.0
+        self._opener_lost_since = 0.0
         self._action_phase = ""
         self._action_log_handle = None
         self._action_log_last = 0.0
@@ -202,6 +204,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._action_phase = ""
         self._suppress_combat_check = False
         self._alert_interrupt.clear()
+        self._opener_lost_since = 0.0
 
     def check_combat(self):
         """紧输入序列(开局)期间抑制战斗检测, 避免大招特写被误判脱战打断."""
@@ -375,34 +378,80 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     # --------------------------------------------------------------- opener
 
     def _opener(self):
+        """开局固定序列.
+
+        序列期间 check_combat 被抑制(避免大招特写被误判脱战), 所以每一步之间自己做一次
+        脱战判断 `_opener_combat_lost()`; 一旦确认敌人没了就中止, 并清掉开场记忆,
+        让下一场战斗重新从金 E 开始。
+        """
         logger.info("four char combo opener start")
         self._set_action_phase("opener")
+        aborted = False
+        target = None
         with self._suspend_combat_check():
             if not self._opener_gold_e_done:
                 self._ensure_current(self.zankou)
                 self._zankou_gold_e()
+            aborted = self._opener_combat_lost("gold_e")
 
-            self._switch_to(self.daffodill)
-            if not self._precombat_daffodill_q_done:
-                self._cast_q(self.daffodill)
+            if not aborted:
+                self._switch_to(self.daffodill)
+                if not self._precombat_daffodill_q_done:
+                    self._cast_q(self.daffodill)
+                aborted = self._opener_combat_lost("daffodill")
 
-            self._switch_to(self.iroi)
-            self._skill_until_registered(self.iroi)
+            if not aborted:
+                self._switch_to(self.iroi)
+                self._skill_until_registered(self.iroi)
+                aborted = self._opener_combat_lost("iroi")
 
-            self._switch_to(self.sakiri)
-            self._cast_q(self.sakiri)
-            self._skill_until_registered(self.sakiri)
+            if not aborted:
+                self._switch_to(self.sakiri)
+                self._cast_q(self.sakiri)
+                self._skill_until_registered(self.sakiri)
+                aborted = self._opener_combat_lost("sakiri")
 
-            self._switch_to(self.zankou)
-            self._zankou_double_q()
-            self._zankou_combo()
-            self._switch_to(self.iroi)
+            if not aborted:
+                self._switch_to(self.zankou)
+                self._zankou_double_q()
+                self._zankou_combo()
+                aborted = self._opener_combat_lost("zankou_double_q")
 
-            self._iroi_q_funnel()
+            if not aborted:
+                self._switch_to(self.iroi)
+                self._iroi_q_funnel()
+                aborted = self._opener_combat_lost("iroi_funnel")
 
-            target = self._zankou_combo_switch(self.daffodill)
+            if not aborted:
+                target = self._zankou_combo_switch(self.daffodill)
+
+        if aborted:
+            logger.info("four char combo opener aborted (combat ended), reset precombat memory")
+            self._opener_gold_e_done = False
+            self._precombat_daffodill_q_done = False
+            return
         if target is self.daffodill:
             self._daffodill_until_cycle_full()
+
+    def _opener_combat_lost(self, tag):
+        """开场序列中途的脱战判断.
+
+        `in_combat()` 只有在连续丢失 Lv/target 约 3.5s 后才会返回 False, 所以单次 False
+        仍可能是大招特写; 这里要求它连续为 False 达到 OPENER_COMBAT_LOST_GRACE 秒才确认脱战。
+        """
+        self._maybe_log_combat_state(f"opener_{tag}")
+        if self.in_combat():
+            self._opener_lost_since = 0.0
+            return False
+        now = time.time()
+        if not self._opener_lost_since:
+            self._opener_lost_since = now
+            return False
+        if now - self._opener_lost_since < self.OPENER_COMBAT_LOST_GRACE:
+            return False
+        logger.info(f"four char combo opener combat lost at [{tag}]")
+        self._opener_lost_since = 0.0
+        return True
 
     # ------------------------------------------------------------ main loop
 
