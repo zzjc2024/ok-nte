@@ -101,7 +101,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     ANIMATION_STABLE_TIME = 0.3
     CYCLE_STAY_RATIO = 0.9
     COMBAT_STATE_LOG_INTERVAL = 2.0
-    OPENER_COMBAT_LOST_GRACE = 2.0
+    OPENER_COMBAT_LOST_GRACE = 1.5
     SOUND_IMMEDIATE_SPAM_TIME = 1.2
     SOUND_SUCCESS_CLICK_DOWN = 0.08
     SOUND_SUCCESS_WAIT = 0.18
@@ -413,6 +413,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
 
             if not aborted:
                 self._switch_to(self.zankou)
+                aborted = self._opener_combat_lost("zankou_before_double_q")
+            if not aborted:
                 self._zankou_double_q()
                 self._zankou_combo()
                 aborted = self._opener_combat_lost("zankou_double_q")
@@ -433,14 +435,24 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         if target is self.daffodill:
             self._daffodill_until_cycle_full()
 
+    def _enemy_present(self):
+        """便宜的"敌人还在"信号: boss / Lv / 目标 / 红血条.
+
+        故意不用 `in_combat()`: 后者在关卡切换或敌人刚死时会因为异步检测 pending、
+        或"重新索敌成功"而继续返回 True; 原始信号才是真值。也不会有 middle_click 副作用。
+        """
+        self.next_frame()
+        return bool(
+            self.is_boss() or self.find_lv() or self.find_target() or self.has_health_bar()
+        )
+
     def _opener_combat_lost(self, tag):
         """开场序列中途的脱战判断.
 
-        `in_combat()` 只有在连续丢失 Lv/target 约 3.5s 后才会返回 False, 所以单次 False
-        仍可能是大招特写; 这里要求它连续为 False 达到 OPENER_COMBAT_LOST_GRACE 秒才确认脱战。
+        连续 OPENER_COMBAT_LOST_GRACE 秒看不到任何敌人信号才确认脱战。
         """
         self._maybe_log_combat_state(f"opener_{tag}")
-        if self.in_combat():
+        if self._enemy_present():
             self._opener_lost_since = 0.0
             return False
         now = time.time()
@@ -701,6 +713,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             f"cd={self.get_cd('ultimate'):.2f} "
             f"current={self.get_current_char(raise_exception=False)}"
         )
+        if not self._enemy_present():
+            logger.warning("zankou double q skipped: no enemy signal, keep the ultimate")
+            return
         if not self._press_q_ready(zankou):
             return
         self._wait_in_team(timeout=self.ENTRY_SKILL_WAIT)
