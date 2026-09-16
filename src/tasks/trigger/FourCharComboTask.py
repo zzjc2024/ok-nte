@@ -42,7 +42,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     Q_DOUBLE_TIMEOUT = 8.0
     Q_PRESS_INTERVAL = 0.12
     ENTRY_SKILL_WAIT = 1.6
-    SKILL_REGISTER_TIMEOUT = 1.0
+    SWITCH_VERIFY_ATTEMPTS = 2
+    SKILL_REGISTER_TIMEOUT = 2.0
     DAFFODILL_SKILL_REGISTER_TIMEOUT = 0.5
     CONTROLLABLE_TIMEOUT = 10.0
     ZANKOU_Q_READY_WINDOW = 2.0
@@ -393,7 +394,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 if char.has_cd("skill"):
                     logger.info(f"{char} skill registered")
                     return True
-        logger.warning(f"{char} skill not registered within {timeout}s")
+        logger.warning(
+            f"{char} skill not registered within {timeout}s "
+            f"(available={char.skill_available()}, cd={self.get_cd('skill'):.2f}, "
+            f"current={self.get_current_char(raise_exception=False)})"
+        )
         return False
 
     # ------------------------------------------------------------ pad loops
@@ -476,6 +481,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     def _zankou_double_q(self):
         self._set_action_phase("zankou_double_q")
         zankou = self.zankou
+        logger.info(
+            f"zankou double q start lit={self._q_button_lit()} "
+            f"cd={self.get_cd('ultimate'):.2f} "
+            f"current={self.get_current_char(raise_exception=False)}"
+        )
         if not self._press_q_ready(zankou):
             return
         self._press_q_until_registered(zankou, self._q_button_lit(), self.Q_REGISTER_TIMEOUT)
@@ -514,7 +524,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             char.ultimate_available, time_out=self.Q_READY_TIMEOUT, raise_if_not_found=False
         ):
             return True
-        logger.warning(f"{char} ultimate not ready, skip cast")
+        logger.warning(
+            f"{char} ultimate not ready, skip cast (lit={self._q_button_lit()}, "
+            f"cd={self.get_cd('ultimate'):.2f}, "
+            f"current={self.get_current_char(raise_exception=False)})"
+        )
         return False
 
     def _press_q_until_registered(self, char, was_lit, timeout, stop_on_cd=True):
@@ -671,11 +685,26 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         if current is char:
             return
         entry_skill = current is not None and bool(self.is_cycle_full())
-        self._switch_to_char(
-            char,
-            current_char=current,
-            has_intro=False,
-            retry_intro=False,
-            log_prefix="four_combo switch",
-        )
+        for attempt in range(1, self.SWITCH_VERIFY_ATTEMPTS + 1):
+            self._switch_to_char(
+                char,
+                current_char=current,
+                has_intro=False,
+                retry_intro=False,
+                log_prefix="four_combo switch",
+            )
+            if self._verify_current_char(char):
+                break
+            detection = self._get_current_char_detection(
+                frame=self.frame, char_count=self.team_size
+            )
+            logger.warning(
+                f"four combo switch verify failed, want {char.index}, "
+                f"got {detection.index} (reason={detection.reason}, attempt={attempt})"
+            )
         self._entry_skill_until = time.time() + self.ENTRY_SKILL_WAIT if entry_skill else 0.0
+
+    def _verify_current_char(self, char):
+        """用图像检测确认目标角色确实在场, 避免 active health change 误判切换成功."""
+        detection = self._get_current_char_detection(frame=self.frame, char_count=self.team_size)
+        return detection.accepted and detection.index == char.index
