@@ -253,6 +253,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - **流程日志（首选）**：`logs/four_combo.log`。`_ensure_combo_log_handler()` 给 `ok` logger 挂带 `_ComboLogFilter` 的 FileHandler；放行条件 = **日志正文或 logger 名**含 `FourCharComboTask` / `four_combo` / `four char combo` / `CombatCheck` / `Dodge` / `SoundCombatContext` / `SoundListener` 任一。`__init__` 与每次 `run()` 确保 handler 存在。
   - 看 logger 名是为了让这些模块自身的日志也能进来（否则形如 `Zankou skill registered` 这种不含关键词的正文会被漏掉）。
   - 排查"敌人死了但还卡在战斗状态"：搜 `four char combo combat state [tag]`，这行由 `_maybe_log_combat_state()` 每 `COMBAT_STATE_LOG_INTERVAL=2s` 打印一次，含 `in_combat / scene_cache / uncertain / miss / boss_flag / is_boss / lv / target / health_bar`，一眼看出是哪个信号把战斗状态按住了。
+  - `BaseCombatTask.ultimate_available()` 里的 `char:N, ult:..., conf:...` 已用 `run_with_interval(..., 1, action_name=f"ultimate_available_log_{index}")` 节流到**每角色 1 条/秒**。它原先每轮无条件打印，而 `Iroi._wait_ultimate_unfreeze` 在特写期间以 ~250 次/秒轮询它，会把日志刷爆。加日志时注意别在轮询热路径里直接 `log_info`。
 - **键鼠日志**：`logs/four_combo_actions.log`。格式 `HH:MM:SS.mmm +间隔s [phase] 操作`；每次启动写 `==== session YYYY-MM-DD HH:MM:SS ====`。phase 取值：`precombat_gold_e` / `precombat_daffodill_q` / `opener` / `loop` / `pad_until_q` / `zankou_gold_e` / `zankou_enter` / `zankou_combo` / `zankou_double_q` / `zankou_cycle_full` / `iroi_funnel` / `daffodill_window` / `sound_success` / `sound_success_interrupt`。本地生成物，不要提交。
 - 全量日志：`logs/ok-script.log`（每天午夜轮转、保留 7 天）。
 
