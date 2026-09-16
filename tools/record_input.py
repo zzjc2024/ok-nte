@@ -11,11 +11,15 @@
 
 并轮询残虹 E 图标状态(assets/coco_annotations.json 里的 zankou_skill_gold /
 zankou_skill_purple, 与 app 同一套模板和阈值), 状态变化时插入一条
-`skill E purple -> gold (gold=0.831 purple=0.102)`, 便于测量"长按多久才变金 E"
-以及"金 E 什么时候变回去"。
+`skill E white -> gold (gold=0.831 purple=0.033 white_ratio=0.18)`, 便于测量
+"长按多久才变金 E" 以及 "金 E 什么时候变回去"。
+
+截图按 app 的方式做: 找 hwnd_class=UnrealWindow 的游戏窗口, 用 ok 的
+BitBlt_RenderFull 截客户区(窗口被遮挡也能截), 所以 1920x1080 窗口运行也准;
+模板会按帧尺寸自动缩放, 分数可以和 app 日志里的 conf 直接比。
 
 只监听本机输入事件, 不注入、不读取游戏内存; 音频走 WASAPI 进程回环, 图像走
-屏幕截图模板匹配, 都不做进程注入.
+窗口截图模板匹配, 都不做进程注入.
 """
 
 import os
@@ -59,6 +63,12 @@ SKILL_STATE_NONE = "none"
 # 实测(assets/images): 金 E 0.18, 紫 E 0.35, 纯黑空帧 0.00 -> 0.05 有较大余量, 未在游戏内校准.
 SKILL_WHITE_PIXEL_MIN = 200
 SKILL_WHITE_RATIO_MIN = 0.05
+
+# 截图方式必须与 src/config.py 的 windows 设置一致: 按窗口类找游戏窗口, 截客户区.
+# 这样 1920x1080 窗口跑在 2560x1440 桌面上也能截对(不能截整个桌面).
+GAME_HWND_CLASS = "UnrealWindow"
+GAME_CAPTURE_RENDER_FULL = True  # 对应 app 的 capture_method "BitBlt_RenderFull"
+GAME_WINDOW_RETRY_INTERVAL = 2.0
 
 _MODIFIERS = {
     "ctrl", "ctrl_l", "ctrl_r",
@@ -170,6 +180,106 @@ class SoundMonitor:
         self.on_event(score)
 
 
+def _find_game_hwnd(hwnd_class):
+    """按窗口类找游戏窗口, 返回 (hwnd, client_width, client_height) 或 None."""
+    import win32gui
+
+    found = []
+
+    def callback(hwnd, _):
+        try:
+            if not win32gui.IsWindowVisible(hwnd):
+                return True
+            if win32gui.GetClassName(hwnd) != hwnd_class:
+                return True
+            _, _, client_width, client_height = win32gui.GetClientRect(hwnd)
+        except Exception:
+            return True
+        if client_width <= 0 or client_height <= 0:
+            return True
+        found.append((hwnd, client_width, client_height))
+        return True
+
+    win32gui.EnumWindows(callback, None)
+    if not found:
+        return None
+    return max(found, key=lambda item: item[1] * item[2])
+
+
+class _HwndShim:
+    """ok 的 BitBltCaptureMethod 只用到这些属性(见 ok/device/capture_methods/bitblt.py)."""
+
+    def __init__(self, hwnd, client_width, client_height):
+        import win32gui
+
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        client_x, client_y = win32gui.ClientToScreen(hwnd, (0, 0))
+        self.hwnd = hwnd
+        self.hwnds = None
+        self.x = client_x
+        self.y = client_y
+        self.width = client_width
+        self.height = client_height
+        self.window_width = right - left
+        self.window_height = bottom - top
+        self.real_x_offset = client_x - left
+        self.real_y_offset = client_y - top
+        self.real_width = client_width
+        self.real_height = client_height
+
+
+class GameCapture:
+    """按 app 的方式截游戏窗口客户区(ok 的 BitBlt_RenderFull).
+
+    和 app 的 windows.capture_method 一样用 PrintWindow(PW_RENDERFULLCONTENT):
+    窗口不是前台或被别的窗口挡住也能截到内容, 帧尺寸就是游戏客户区尺寸(如 1920x1080)。
+    """
+
+    def __init__(self, hwnd_class=GAME_HWND_CLASS, render_full=GAME_CAPTURE_RENDER_FULL):
+        self.hwnd_class = hwnd_class
+        self.render_full = render_full
+        self.hwnd = 0
+        self.size = (0, 0)
+        self._capture = None
+
+    def open(self):
+        """找窗口并建好截图器; 返回 (width, height) 或 None(没找到窗口)."""
+        self.close()
+        found = _find_game_hwnd(self.hwnd_class)
+        if found is None:
+            return None
+        hwnd, client_width, client_height = found
+        try:
+            from ok.device.capture_methods import bitblt as bitblt_module
+            from ok.device.capture_methods.bitblt import BitBltCaptureMethod
+
+            bitblt_module.render_full = self.render_full
+            capture = BitBltCaptureMethod(_HwndShim(hwnd, client_width, client_height))
+            capture.exit_event = threading.Event()
+        except Exception as error:
+            print(f"[record] game capture init failed: {error}")
+            return None
+        self.hwnd = hwnd
+        self.size = (client_width, client_height)
+        self._capture = capture
+        return self.size
+
+    def frame(self):
+        if self._capture is None:
+            return None
+        return self._capture.get_frame()
+
+    def close(self):
+        if self._capture is not None:
+            try:
+                self._capture.close()
+            except Exception as error:
+                print(f"[record] game capture close failed: {error}")
+            self._capture = None
+        self.hwnd = 0
+        self.size = (0, 0)
+
+
 class SkillMonitor:
     """后台轮询残虹 E 图标状态, 状态变化时插一条事件.
 
@@ -200,6 +310,7 @@ class SkillMonitor:
         self._started = False
         self._thread = None
         self._feature_set = None
+        self._capture = GameCapture()
 
     def start(self):
         if self._started:
@@ -210,13 +321,11 @@ class SkillMonitor:
 
     def stop(self):
         self._started = False
+        self._capture.close()
 
     def _run(self):
         try:
-            import cv2
-            import numpy as np
             from ok.feature.FeatureSet import FeatureSet
-            from PIL import ImageGrab
         except Exception as error:
             self.status = f"不可用({error.__class__.__name__})"
             print(f"[record] skill monitor unavailable: {error}")
@@ -227,6 +336,15 @@ class SkillMonitor:
             print(f"[record] skill coco json missing: {self.coco_json}")
             return
 
+        while self._started and self._capture.open() is None:
+            self.status = "找不到游戏窗口"
+            print(
+                f"[record] game window ({self._capture.hwnd_class}) not found, retrying"
+            )
+            time.sleep(GAME_WINDOW_RETRY_INTERVAL)
+        if not self._started:
+            return
+
         try:
             self._feature_set = FeatureSet(
                 debug=False,
@@ -235,7 +353,6 @@ class SkillMonitor:
                 default_vertical_variance=0.002,
                 default_threshold=self.threshold,
             )
-            self._grab = lambda: cv2.cvtColor(np.array(ImageGrab.grab()), cv2.COLOR_RGB2BGR)
             # 先跑一次: 加载模板 + 确认模板名存在, 免得之后每 0.05s 抛一次异常
             state, scores = self._poll()
         except Exception as error:
@@ -243,10 +360,14 @@ class SkillMonitor:
             print(f"[record] skill monitor load failed: {error}")
             return
 
+        width, height = self._capture.size
         self.state = state
         self.scores = scores
-        self.status = "监听中"
-        print(f"[record] skill monitor listening for E state @ {self.interval}s")
+        self.status = f"监听中 {width}x{height}"
+        print(
+            f"[record] skill monitor listening for E state @ {self.interval}s "
+            f"window {width}x{height} hwnd={self._capture.hwnd}"
+        )
         last_beat = time.time()
         while self._started:
             start = time.time()
@@ -272,7 +393,9 @@ class SkillMonitor:
             time.sleep(max(0.0, self.interval - (time.time() - start)))
 
     def _poll(self):
-        frame = self._grab()
+        frame = self._capture.frame()
+        if frame is None:
+            raise RuntimeError("no frame from game window")
         scores = {}
         for name in self.features:
             boxes = self._feature_set.find_one_feature(frame, name, threshold=0.001)
