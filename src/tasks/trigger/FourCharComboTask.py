@@ -92,6 +92,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     Q_DOUBLE_TIMEOUT = 8.0
     Q_PRESS_INTERVAL = 0.12
     ENTRY_SKILL_WAIT = 1.6
+    SWITCH_SETTLE_TIME = 0.1
     SUPPRESS_SWITCH_CLICK = True
     SWITCH_CONFIRM_TIMEOUT = 3.0
     CYCLE_BAR_VISIBLE_MIN_PIXELS = 20
@@ -644,6 +645,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         """
         self._set_action_phase("zankou_enter")
         self._switch_to(self.zankou)
+        # 切人刚确认时角色还在切人动画里, 立刻长按普攻不生效 (实测确认后 0.001s 就长按, 金 E 全空)
+        self.sleep(self.SWITCH_SETTLE_TIME)
         self._zankou_combo()
         ratio = self.cycle_ratio()
         if ratio >= self.CYCLE_STAY_RATIO:
