@@ -2,7 +2,7 @@
 
 用法:
     1. 双击 tools/record_input.cmd 以管理员权限启动.
-    2. 点窗口按钮开始/停止记录; 也可用 F9 开始 / F10 停止 (Ctrl+Shift+H/J 可能被输入法占用).
+    2. 点窗口按钮开始/停止记录; 也可用 F10 开始 / F12 停止 (Ctrl+Shift+H/J 可能被输入法占用).
     3. 记录期间实时显示事件; 停止时写入 logs/input_record_YYYYmmdd_HHMMSS.log.
 
 同时后台监听游戏音频, 检测"闪避成功音"(assets/sounds/dodge_success.wav),
@@ -233,11 +233,11 @@ class InputRecorder:
         with self._lock:
             if name in _MODIFIERS:
                 self._modifiers.add(name)
-            if self._hotkey(key, "h") or key == keyboard.Key.f9:
+            if self._hotkey(key, "h") or key == keyboard.Key.f10:
                 self._suppress.update({name} | _MODIFIERS)
                 self._start_locked()
                 return
-            if self._hotkey(key, "j") or key == keyboard.Key.f10:
+            if self._hotkey(key, "j") or key == keyboard.Key.f12:
                 self._suppress.update({name} | _MODIFIERS)
                 self._stop_locked()
                 return
@@ -320,7 +320,7 @@ class RecorderApp:
 
         tk.Label(
             root,
-            text="按钮切换; 热键 F9 开始 / F10 停止 (Ctrl+Shift+H/J 可能被输入法占用)",
+            text="按钮切换; 热键 F10 开始 / F12 停止 (Ctrl+Shift+H/J 可能被输入法占用)",
             anchor="w",
         ).pack(fill="x", padx=8)
 
