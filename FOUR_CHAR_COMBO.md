@@ -66,7 +66,8 @@
 
 ### 1.5 浮游炮（伊洛伊）
 
-点 Q → **特写一结束就开始长按左键** → **直到冷却数字开始跳才松手** → 睡 0.3s → **单击左键**。
+点 Q → 长按左键（**长按/等待对齐原版 `Iroi._wait_ultimate_unfreeze`**：`mouse_down` 后等 `box_ultimate` 图标变化 / Q 不可用）→ 松手 → 睡 **0.3s** → **单击左键**。
+- 说明：`mouse_down`/等待逻辑沿用原版出招表（`iroi._wait_ultimate_unfreeze`）；结尾 `sleep 0.3s + 单击左键` 是本脚本规范额外要求的，不在原版里。
 
 ### 1.6 闪避反击反应
 
@@ -223,6 +224,8 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - **修复切人误判（残虹没上场但脚本以为上场）**：`_switch_to` 增加 `_verify_current_char` 图像验证 + 重试（`SWITCH_VERIFY_ATTEMPTS=2`），避免 `active health change` 把未完成的切换当成功。
 - 新增独立流程日志 `logs/four_combo.log`（过滤 handler），排查时优先读它，避免 `ok-script.log` 前段无关日志。
 - 修复切人验证误报：`_verify_current_char` 改为**轮询等待**（`SWITCH_VERIFY_TIMEOUT=1.0`），`SWITCH_VERIFY_ATTEMPTS=3`；新增 `SUPPRESS_SWITCH_CLICK=True` 跳过切人自带左键点击（对应"二连先点按几下"）。
+- 浮游炮 `_iroi_q_funnel` 长按/等待对齐原版出招表（复用 `iroi._wait_ultimate_unfreeze`，等 `box_ultimate` 图标变化），结尾保留本脚本的 `sleep 0.3s + 单击左键`。
+- `_zankou_fixed_step` 增加 Q 状态诊断日志（`q_available` / `q_cd` / `lit` / `current`），用于排查主循环双 Q 未触发。
 
 **实测已知问题（最近一轮日志结论）**：
 - `is_in_team` 动画判断失效 → 已修（移除）。

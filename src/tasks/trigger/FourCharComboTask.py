@@ -389,9 +389,15 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
 
     def _zankou_fixed_step(self):
         zankou = self.zankou
-        if zankou.ultimate_available():
+        q_available = zankou.ultimate_available()
+        q_remaining = self._zankou_q_remaining()
+        logger.info(
+            f"zankou fixed step q_available={q_available} q_cd={q_remaining:.2f} "
+            f"lit={self._q_button_lit()} current={self.get_current_char(raise_exception=False)}"
+        )
+        if q_available:
             self._zankou_double_q()
-        elif 0 < self._zankou_q_remaining() < self.ZANKOU_Q_READY_WINDOW:
+        elif 0 < q_remaining < self.ZANKOU_Q_READY_WINDOW:
             self._stay_until_q_ready(zankou)
             self._zankou_double_q()
         return self._zankou_combo_switch(self.daffodill)
@@ -599,17 +605,24 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         return False
 
     def _iroi_q_funnel(self):
+        """伊洛伊浮游炮: 长按部分对齐原版出招表.
+
+        原版 Iroi._wait_ultimate_unfreeze 内部自己 mouse_down, 等待信号是
+        box_ultimate 图标变化 / Q 不可用; 这里沿用, 松手后按本脚本规范补
+        sleep IROI_FUNNEL_POST_SLEEP(0.3s) + 单击左键。
+        """
         self._set_action_phase("iroi_funnel")
         iroi = self.iroi
         if not self._press_q_ready(iroi):
             return
         was_lit = self._q_button_lit()
         self._press_q_until_registered(iroi, was_lit, self.Q_REGISTER_TIMEOUT)
-        self.mouse_down()
         try:
-            self._wait_cd_ticking()
+            iroi._wait_ultimate_unfreeze(time.time())
         finally:
-            self.mouse_up()
+            if iroi._mouse_pressed:
+                self.mouse_up()
+                iroi._mouse_pressed = False
         self.sleep(self.IROI_FUNNEL_POST_SLEEP)
         self.click()
 
