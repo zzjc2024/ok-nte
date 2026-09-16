@@ -443,14 +443,16 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         with self.skip_sleep_checks() as skip:
             skip.check_combat = True
             while time.time() < deadline:
-                char.send_skill_key(down_time=0.05)
+                if char.skill_available():
+                    char.send_skill_key(down_time=0.05)
                 self.sleep(0.05)
                 if char.has_cd("skill"):
                     logger.info(f"{char} skill registered")
                     return True
         logger.warning(
             f"{char} skill not registered within {timeout}s "
-            f"(available={char.skill_available()}, cd={self.get_cd('skill'):.2f}, "
+            f"(lit={self.box_highlighted('skill')}, cd={self.get_cd('skill'):.2f}, "
+            f"in_team={bool(self.is_in_team())}, "
             f"current={self.get_current_char(raise_exception=False)})"
         )
         return False
@@ -821,4 +823,5 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             retry_intro=False,
             log_prefix="four_combo switch",
         )
+        self._wait_in_team(timeout=self.CONTROLLABLE_TIMEOUT)
         self._entry_skill_until = time.time() + self.ENTRY_SKILL_WAIT if entry_skill else 0.0
