@@ -85,6 +85,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     Q_PRESS_INTERVAL = 0.12
     ENTRY_SKILL_WAIT = 1.6
     SUPPRESS_SWITCH_CLICK = True
+    SWITCH_CONFIRM_TIMEOUT = 3.0
     CYCLE_BAR_VISIBLE_MIN_PIXELS = 20
     IROI_FUNNEL_ANIMATION_TIMEOUT = 5.0
     SKILL_REGISTER_TIMEOUT = 2.0
@@ -439,10 +440,21 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             timeout = self.SKILL_REGISTER_TIMEOUT
         if char.has_cd("skill"):
             return True
-        deadline = time.time() + timeout
+        start = time.time()
+        deadline = start + timeout
+        last_log = -1.0
         with self.skip_sleep_checks() as skip:
             skip.check_combat = True
             while time.time() < deadline:
+                elapsed = time.time() - start
+                if elapsed - last_log >= 0.4:
+                    last_log = elapsed
+                    logger.info(
+                        f"{char} skill wait t={elapsed:.2f}s "
+                        f"lit={self.box_highlighted('skill')} "
+                        f"cd={self.get_cd('skill'):.2f} "
+                        f"in_team={bool(self.is_in_team())}"
+                    )
                 if char.skill_available():
                     char.send_skill_key(down_time=0.05)
                 self.sleep(0.05)
@@ -816,12 +828,40 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         if current is char:
             return
         entry_skill = current is not None and bool(self.is_cycle_full())
-        self._switch_to_char(
-            char,
-            current_char=current,
-            has_intro=False,
-            retry_intro=False,
-            log_prefix="four_combo switch",
-        )
         self._wait_in_team(timeout=self.CONTROLLABLE_TIMEOUT)
+        self._confirm_switch(char, current)
         self._entry_skill_until = time.time() + self.ENTRY_SKILL_WAIT if entry_skill else 0.0
+
+    def _confirm_switch(self, char, current):
+        """等脱离动画后重按切人键, 直到图像确认目标角色上场; 不做额外点击.
+
+        不采信框架 `_switch_to_char` 的 active health change (会误报)。
+        """
+        start = time.time()
+        deadline = start + self.SWITCH_CONFIRM_TIMEOUT
+        detection = None
+        with self.skip_sleep_checks() as skip:
+            skip.check_combat = True
+            while time.time() < deadline:
+                detection = self._get_current_char_detection(
+                    frame=self.frame, char_count=self.team_size
+                )
+                if detection.accepted and detection.index == char.index:
+                    self._set_current_char(current, char, has_intro=False)
+                    logger.info(
+                        f"four combo switch confirmed -> {char} in {time.time() - start:.2f}s"
+                    )
+                    return True
+                self.send_key(
+                    char.index + 1,
+                    action_name="four_combo_switch",
+                    interval=0.2,
+                    down_time=0.05,
+                )
+                self.sleep(0.05)
+        logger.warning(
+            f"four combo switch not confirmed, want {char.index}, "
+            f"got {detection.index if detection else None} "
+            f"(reason={detection.reason if detection else None})"
+        )
+        return False

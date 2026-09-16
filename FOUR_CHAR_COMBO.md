@@ -152,7 +152,8 @@
 | `_iroi_q_funnel` | 浮游炮 |
 | `_wait_controllable` / `_wait_cd_ticking` | 可控判定 |
 | `_sound_dodge_action` / `_sound_counter_action` / `_sound_immediate_reaction` / `_maybe_handle_sound_counter` / `_sound_reaction_zankou` | 闪避反击与反应 |
-| `_switch_to` / `_ensure_current` | 切人（切前读上一任环合设入场窗口） |
+| `_switch_to` / `_ensure_current` | 切人（切前读上一任环合设入场窗口）；切前 `_wait_in_team` 等脱离动画，再 `_confirm_switch` |
+| `_confirm_switch` | **自研切人确认**：重按切人键直到 `_get_current_char_detection` 图像确认目标上场；不采信 `active health change`，不做额外点击 |
 
 ### 4.2 关键常量（`FourCharComboTask`）
 
@@ -162,8 +163,9 @@ COMBO_RELEASE_GAP=0.06  COMBO_CLICK_GAP=0.05
 SKILL_REGISTER_TIMEOUT=2.0  DAFFODILL_SKILL_REGISTER_TIMEOUT=0.5
 GOLD_THRESHOLD=0.7  DAFFODILL_FIELD_TIME=1.5  PAD_FIELD_TIME=1.5  IROI_FUNNEL_POST_SLEEP=0.3
 Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTERVAL=0.12
-ENTRY_SKILL_WAIT=1.6  SUPPRESS_SWITCH_CLICK=True  CYCLE_BAR_VISIBLE_MIN_PIXELS=20
-IROI_FUNNEL_ANIMATION_TIMEOUT=5.0  CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
+ENTRY_SKILL_WAIT=1.6  SUPPRESS_SWITCH_CLICK=True  SWITCH_CONFIRM_TIMEOUT=3.0
+CYCLE_BAR_VISIBLE_MIN_PIXELS=20  IROI_FUNNEL_ANIMATION_TIMEOUT=5.0
+CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
 SOUND_REACTION_DAFFODILL_TIME=1.0  SOUND_IMMEDIATE_SPAM_TIME=1.2  SCRIPT_TICK=0.05
 ACTION_LOG_PATH=logs/four_combo_actions.log
 ```
@@ -202,8 +204,9 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 9. **中文标点**：新增/修改 Python 源码注释和字符串时用 ASCII `,` `;`（仓库 AGENTS.md 要求）。
 10. **日志脱敏**：不要提交用户日志、截图、账号、本机隐私路径。
 11. **Z 盘是 ramdisk**：重启清空，仓库必须放 C 盘。
-12. **切人检测不可靠，别叠加"二次验证"**：`_switch_to_char` 的 `active health change` 会误判；但 `_get_current_char_detection`（active_marker）同样不可靠（实测残虹已上场却连续 3s 报 `got 1`）。曾加过 `_verify_current_char` 轮询+重试，结果**每次失败轮询 1s ×3 次 ≈ 3s**，把达芙蒂尔/切换环节严重拖长（日志 `10:34:44~47` 连续 `verify failed want 0 got 1`）。**已移除**，回到单次 `_switch_to_char`。判别检测是否靠谱看 `info_set current char idx X conf Y`：`conf=0.750`（= `reject_score`）表示"检测到的当前角色不是目标"。
-    - `SUPPRESS_SWITCH_CLICK=True` 跳过框架切人自带的 `switch_char_click` 左键点击，避免"二连前先点按几下"。
+12. **切人改用自研确认（不采信框架检测）**：框架 `_switch_to_char` 的 `active health change` 会误判（残虹没上场却报成功）；图像检测 `_get_current_char_detection` 才是真值。现 `_switch_to`：先 `_wait_in_team` 等脱离大招/切人动画，再 `_confirm_switch` 重按切人键直到图像确认目标上场（最多 `SWITCH_CONFIRM_TIMEOUT=3.0s`），确认后 `_set_current_char` 更新标志。日志会打 `four combo switch confirmed -> X in Y.YYs` 或 `not confirmed`。
+    - 检测真值判别：`info_set current char idx X conf Y` 中 `conf=0.750`（= `reject_score`）表示"检测到的当前角色不是目标"。
+    - `SUPPRESS_SWITCH_CLICK=True` 跳过框架切人自带的 `switch_char_click` 左键点击（自研切人本身也不点击），避免"二连前先点按几下"。
 
 ---
 
@@ -232,6 +235,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - **移除切人二次验证**：`_verify_current_char` 轮询+重试在实测中反复误报（达芙蒂尔站场被拖长 ~3s/次），已回退到单次 `_switch_to_char`。
 - 浮游炮特写判定改用 `is_in_team`（`_wait_iroi_cutscene`），环合条像素保留作对照采样。
 - **残虹双 Q 改为"连按 Q + 数大招动画次数"**：`is_in_team` True→False 记一次，数到 2 次停止（用户方案）。
+- **切人改为自研确认 `_confirm_switch`**：先等脱离动画，再重按切人键直到图像确认目标上场（不采信 `active health change`、不额外点击）；E 改为只在图标亮起时按，并加 `skill wait t=.. lit=.. cd=.. in_team=..` 采样日志。
 
 **实测已知问题（最近一轮日志结论）**：
 - `is_in_team` 动画判断失效 → 已修（移除）。
