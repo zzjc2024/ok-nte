@@ -1,3 +1,4 @@
+import logging
 import os
 import threading
 import time
@@ -13,6 +14,45 @@ from src.combat.BaseCombatTask import BaseCombatTask, NotInCombatException
 from src.Labels import Labels
 
 logger = Logger.get_logger(__name__)
+
+COMBO_LOG_PATH = os.path.join("logs", "four_combo.log")
+_COMBO_LOG_KEYWORDS = (
+    "FourCharComboTask",
+    "four_combo",
+    "four char combo",
+    "CombatCheck",
+    "Dodge",
+    "SoundCombatContext",
+    "SoundListener",
+)
+
+
+class _ComboLogFilter(logging.Filter):
+    """只放行四人连招排查相关的日志行."""
+
+    def filter(self, record):
+        try:
+            message = record.getMessage()
+        except Exception:
+            return False
+        return any(keyword in message for keyword in _COMBO_LOG_KEYWORDS)
+
+
+def _ensure_combo_log_handler():
+    """确保 ok logger 上挂着写 logs/four_combo.log 的过滤 handler."""
+    ok_logger = logging.getLogger("ok")
+    for handler in ok_logger.handlers:
+        if getattr(handler, "_four_combo_handler", False):
+            return
+    try:
+        os.makedirs(os.path.dirname(COMBO_LOG_PATH), exist_ok=True)
+        handler = logging.FileHandler(COMBO_LOG_PATH, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        handler.addFilter(_ComboLogFilter())
+        handler._four_combo_handler = True
+        ok_logger.addHandler(handler)
+    except Exception as e:
+        logger.error(f"four combo log handler setup failed {e}")
 
 
 class FourCharComboTask(BaseCombatTask, TriggerTask):
@@ -71,6 +111,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._action_log_last = 0.0
         self._action_log_lock = threading.Lock()
         self._suppress_combat_check = False
+        _ensure_combo_log_handler()
 
     # ---------------------------------------------------------------- chars
 
@@ -112,6 +153,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         return True
 
     def run(self):
+        _ensure_combo_log_handler()
         if not self.scene.is_in_team(self.is_in_team):
             self._log_run_state("not_in_team")
             return

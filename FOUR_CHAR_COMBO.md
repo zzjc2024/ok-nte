@@ -218,6 +218,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - 排查“早雾 Q 后没接上残虹双 Q”：日志显示残虹**已切上场**（`info_set current char idx 0`），但残虹 Q 被判不可用（`wait_until timeout BaseChar.ultimate_available of Zankou 5.0s`）→ 跳过双 Q。已加诊断日志：`_zankou_double_q` 开始、`_press_q_ready` 失败、`_skill_until_registered` 失败时打印 `lit/cd/current`（或 `available/cd`），待复现定位。
 - 同批日志发现伊洛伊 E、早雾 E 均 `skill not registered within 1.0s`（疑似被切人/入场技吃掉），`SKILL_REGISTER_TIMEOUT` 1.0 → **2.0**（覆盖入场技 ~1.6s）。
 - **修复切人误判（残虹没上场但脚本以为上场）**：`_switch_to` 增加 `_verify_current_char` 图像验证 + 重试（`SWITCH_VERIFY_ATTEMPTS=2`），避免 `active health change` 把未完成的切换当成功。
+- 新增独立流程日志 `logs/four_combo.log`（过滤 handler），排查时优先读它，避免 `ok-script.log` 前段无关日志。
 
 **实测已知问题（最近一轮日志结论）**：
 - `is_in_team` 动画判断失效 → 已修（移除）。
@@ -243,6 +244,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - 代理（装依赖用）：`http://127.0.0.1:7897`。
 - 启动：`start.bat`（自动请求管理员权限，跑 `.venv\Scripts\python.exe main.py`）。
 - 日志：`logs\ok-script.log`，每天午夜轮转 `ok-script.YYYY-MM-DD.log`，保留 7 天；`main_debug.py` 同文件、级别 DEBUG。
+- **连招流程日志（排查首选）**：`logs\four_combo.log`。实现方式：`_ensure_combo_log_handler()` 给 `ok` logger 挂一个带 `_ComboLogFilter` 的 FileHandler，只放行含 `FourCharComboTask` / `four_combo` / `four char combo` / `CombatCheck` / `Dodge` / `SoundCombatContext` / `SoundListener` 的日志行，因此内容干净、无其他任务与启动噪音。`__init__` 与每次 `run()` 都会确保 handler 存在（防止 `config_logger` 重置 handlers）。
 - 连招键鼠日志：`logs\four_combo_actions.log`（仅本任务写入，追加不轮转）。每行格式
   `HH:MM:SS.mmm +间隔s [phase] 操作`，例如 `[zankou_combo] mouse_down left`；
   每次启动写一行 `==== session YYYY-MM-DD HH:MM:SS ====`。phase 取值：
