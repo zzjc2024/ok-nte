@@ -264,3 +264,4 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - 框架源码：`.venv/Lib/site-packages/ok/`（ok-script 2.0.4）。
 - 角色基类：`src/char/BaseChar.py`；战斗基类：`src/combat/BaseCombatTask.py`。
 - 现有 planner 角色实现可参考：`src/char/Hotori.py`（复杂协作）、`src/char/Daffodill.py`、`src/char/Iroi.py`、`src/char/Zankou.py`。
+- 手动键鼠录制工具：`tools/record_input.py` + `tools/record_input.cmd`（管理员启动）。`Ctrl+Shift+H` 开始、`Ctrl+Shift+J` 停止，日志写入 `logs/input_record_*.log`，格式与 `four_combo_actions.log` 一致，便于对手动操作与脚本时序。
