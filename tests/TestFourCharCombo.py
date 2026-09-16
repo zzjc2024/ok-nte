@@ -32,6 +32,7 @@ class TestFourCharCombo(unittest.TestCase):
         task._health_pixels = Mock(return_value=300)
         task._recover_from_dodge = Mock(return_value=False)
         task._raise_combo_anomaly = Mock(side_effect=ZankouComboAnomaly("anomaly"))
+        task.chars = [Mock(index=index) for index in range(4)]
         self.task = task
 
     def test_hold_returns_dodge_when_dodge_heard_during_hold(self):
@@ -65,11 +66,27 @@ class TestFourCharCombo(unittest.TestCase):
 
     def test_no_gold_and_no_damage_still_raises_anomaly(self):
         self.task._hold_until_gold = Mock(return_value=(HoldResult.NO_GOLD, False))
+        self.task._verify_current = Mock(return_value=True)
 
         with self.assertRaises(ZankouComboAnomaly):
             self.task._zankou_hold_with_recovery()
 
         self.task._raise_combo_anomaly.assert_called_once()
+
+    def test_no_gold_but_wrong_char_reswitches_instead_of_anomaly(self):
+        # 实测 bug: 切人高亮误报 confirmed, 场上其实还是早雾 -> 不该抛异常停任务
+        self.task._hold_until_gold = Mock(
+            side_effect=[(HoldResult.NO_GOLD, False), (HoldResult.GOLD, False)]
+        )
+        self.task._verify_current = Mock(side_effect=[False, True])
+        self.task._switch_to = Mock()
+        self.task.get_current_char = Mock(return_value="Sakiri")
+
+        result = self.task._zankou_hold_with_recovery()
+
+        self.assertIs(result, HoldResult.GOLD)
+        self.task._switch_to.assert_called_once()
+        self.task._raise_combo_anomaly.assert_not_called()
 
     def test_dodge_success_reaction_defers_to_active_hold(self):
         self.task._holding = True

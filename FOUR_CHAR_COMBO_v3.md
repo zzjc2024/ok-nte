@@ -184,7 +184,8 @@ White → Green → Red → Purple → Blue → Yellow → White
 
 ## 5. 已验证的可靠性规则（最容易重新踩的坑）
 
-1. **切人检测不可靠 → 自研确认**：框架 `active health change` 会误报（残虹没上场却报成功）。用 `_get_current_char_detection()` 图像确认，重按切人键直到确认目标上场（超时 3s）。跳过框架切人自带的左键点击，避免"二连前先点按几下"。
+1. **切人检测不可靠 → 自研确认 + 关键节点复查**：框架 `active health change` 会误报（残虹没上场却报成功）。用 `_get_current_char_detection()` 图像确认，重按切人键直到目标高亮**连续稳定 `SWITCH_CONFIRM_STABLE=0.15s`**（过滤切换动画里的瞬态高亮），超时 3s；跳过框架切人自带的左键点击。
+   **但仍会误判**：实测 21:01 早雾→残虹 日志打了 `switch confirmed -> Zankou in 0.83s`，场上其实还是早雾（随后二连长按期间金 E 模板全程 `conf=0.000`，触发"没掉血也没金 E"异常停任务）。所以**关键节点必须复查**：`_verify_current(char)` 重新检测 2 次；二连"没掉血也没金 E"时先复查当前角色，不是残虹就**重切再打一轮**，只有确认人在残虹身上还不出金 E 才抛 `ZankouComboAnomaly`。
 2. **不要用 `in_combat()` 判断"敌人还在"**：关卡切换/敌人刚死时它会因异步检测 pending 或"重新索敌成功"而继续返回 True（日志 `miss=0` 且 `is_boss/lv/target/health_bar` 全 False 却仍 in_combat）。用 `_enemy_present()` 的原始信号。
 3. **`get_cd()` 不能判断"冷却是否开始计时"**：它是"OCR 值 − 自快照以来的时间"，冷却数字只要挂在屏幕上就一路变小（即使游戏冻结冷却）。游戏在 Q 动画期间把冷却数字**冻结在满值**（实测 Q#2 后 3.1s 原始值仍是 `20.0`）→ 必须看**原始数字**是否变小。
 4. **不要"动画一结束就长按"**：双 Q 后必须等 §4.2 的两个条件；切人/入场技期间按住不生效，必须等 §4.4 的 1.1s。
@@ -216,8 +217,8 @@ White → Green → Red → Purple → Blue → Yellow → White
 
 **已知限制（暂不改）**
 - 双 Q 的 `exit2` 基本确认不了（超时 8s < 全程 ~11s），二连时机不依赖它。
-- 早雾 E 经常放不出来（日志 `Sakiri skill not registered within 2.0s`，`lit=0` / `in_team=False`）。
-- 切人偶发确认失败（`four combo switch not confirmed, want X, got -1`）。
+- 早雾 E 经常放不出来（日志 `Sakiri skill not registered within 2.0s`，`lit=0` / `in_team=False`）。根因多半是她刚放完 Q 还在大招特写里（`in_team=False`），而 `_skill_until_registered` 只等 2s → **待改**：先等可控再点 E。
+- 切人确认**两个方向都会错**：漏判（`four combo switch not confirmed, want X, got -1`）和误判（21:01 早雾→残虹 误报 confirmed，见 §5.1）。误判已由 `_verify_current` + 二连前的复查兜住；漏判仍靠重按 3s 兜。
 
 ---
 

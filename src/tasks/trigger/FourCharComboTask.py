@@ -125,6 +125,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     SWITCH_SETTLE_TIME = 0.1
     SUPPRESS_SWITCH_CLICK = True
     SWITCH_CONFIRM_TIMEOUT = 3.0
+    # 切人确认要求目标高亮连续稳定这么久(过滤切换动画里的瞬态高亮)
+    SWITCH_CONFIRM_STABLE = 0.15
     CYCLE_BAR_VISIBLE_MIN_PIXELS = 20
     IROI_FUNNEL_ANIMATION_TIMEOUT = 5.0
     SKILL_REGISTER_TIMEOUT = 2.0
@@ -718,6 +720,17 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             if result is not HoldResult.NO_GOLD:
                 return result
             if not damaged:
+                # 先复查当前角色: 切人高亮会在切换动画里先跳到目标上(实测 早雾->残虹 误判成
+                # confirmed, 但场上还是早雾), 所以"没掉血也没金 E"先当成切人失败重切,
+                # 只有确认人在残虹身上还不出金 E 才是真异常。
+                if not self._verify_current(self.zankou):
+                    logger.warning(
+                        f"zankou gold E missing and current char is not Zankou "
+                        f"({self.get_current_char(raise_exception=False)}): switch failed, retry"
+                    )
+                    self._switch_to(self.zankou)
+                    damaged = False
+                    continue
                 self._raise_combo_anomaly(
                     f"zankou gold E missing while not damaged (hold {self.COMBO_HOLD_MAX}s)"
                 )
@@ -1411,14 +1424,33 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._confirm_switch(char, current)
         self._entry_skill_until = started + self.ENTRY_SKILL_WAIT if entry_skill else 0.0
 
+    def _verify_current(self, char, samples=2, gap=0.05):
+        """关键节点复查当前角色: 重新做图像检测(绕过 sticky tracker), 连续 samples 次命中才算.
+
+        切人高亮会在切换动画里先跳到目标角色上, 但游戏实际可能还留在原角色
+        (实测 21:01 早雾 -> 残虹 被判 confirmed, 场上仍是早雾), 所以关键步骤前要复查。
+        """
+        with self.skip_sleep_checks() as skip:
+            skip.check_combat = True
+            for _ in range(max(1, samples)):
+                detection = self._get_current_char_detection(
+                    frame=self.frame, char_count=self.team_size
+                )
+                if not (detection.accepted and detection.index == char.index):
+                    return False
+                self.sleep(gap)
+        return True
+
     def _confirm_switch(self, char, current):
         """等脱离动画后重按切人键, 直到图像确认目标角色上场; 不做额外点击.
 
         不采信框架 `_switch_to_char` 的 active health change (会误报)。
+        要求目标高亮**连续稳定 SWITCH_CONFIRM_STABLE 秒**才算确认, 过滤切换动画里的瞬态高亮。
         """
         start = time.time()
         deadline = start + self.SWITCH_CONFIRM_TIMEOUT
         detection = None
+        stable_since = 0.0
         with self.skip_sleep_checks() as skip:
             skip.check_combat = True
             while time.time() < deadline:
@@ -1426,11 +1458,16 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                     frame=self.frame, char_count=self.team_size
                 )
                 if detection.accepted and detection.index == char.index:
-                    self._set_current_char(current, char, has_intro=False)
-                    logger.info(
-                        f"four combo switch confirmed -> {char} in {time.time() - start:.2f}s"
-                    )
-                    return True
+                    if stable_since == 0.0:
+                        stable_since = time.time()
+                    if time.time() - stable_since >= self.SWITCH_CONFIRM_STABLE:
+                        self._set_current_char(current, char, has_intro=False)
+                        logger.info(
+                            f"four combo switch confirmed -> {char} in {time.time() - start:.2f}s"
+                        )
+                        return True
+                else:
+                    stable_since = 0.0
                 self.send_key(
                     char.index + 1,
                     action_name="four_combo_switch",
