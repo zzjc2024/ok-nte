@@ -59,10 +59,16 @@ SKILL_STATE_LABELS = {
 }
 SKILL_STATE_WHITE = "white"
 SKILL_STATE_NONE = "none"
-# 诊断用: 模板框内"近白像素"占比, 用来分辨"真的白 E"还是"根本没图标".
-# 实测(assets/images): 金 E 0.18, 紫 E 0.35, 纯黑空帧 0.00 -> 0.05 有较大余量, 未在游戏内校准.
+# 状态判定(用实测数据校准, 见 logs/skill_state.log):
+#   金 E 时 gold 分数在 0.45~0.86 之间来回跳(图标有呼吸/亮度动画), purple 最高 0.40;
+#   紫 E 时 purple 0.66~0.84, gold 最高 0.18;
+#   白 E / 无图标时两个模板都 <= 0.29。
+# 所以不能像 app 那样用 0.7 绝对阈值(会把金 E 的暗相位误报成白), 改成"谁高算谁 + 下限 + 迟滞"。
+SKILL_STATE_MIN_CONF = 0.35
+SKILL_STATE_SWITCH_MARGIN = 0.05
+# 模板框内近白像素占比: 有图标(白/金/紫)时 >= 0.11, 没图标时 <= 0.07, 取中间值。
 SKILL_WHITE_PIXEL_MIN = 200
-SKILL_WHITE_RATIO_MIN = 0.05
+SKILL_WHITE_RATIO_MIN = 0.09
 
 # 截图方式必须与 src/config.py 的 windows 设置一致: 按窗口类找游戏窗口, 截客户区.
 # 这样 1920x1080 窗口跑在 2560x1440 桌面上也能截对(不能截整个桌面).
@@ -293,11 +299,12 @@ class SkillMonitor:
     和流程日志里的 conf 对比。
 
     E 有三个状态: white(初始) -> gold(条件触发) -> purple(金 E 放完且残虹没离场, 实际不用)。
-    每次轮询截全屏(物理像素) -> 在模板标注框附近做匹配:
-      - 哪个模板分数最高且 >= 阈值 -> 就是那个状态;
-      - 两个都没过阈值 -> white(初始状态, 没有对应模板)。
-    white 时同时记录模板框内近白像素占比(white_ratio)作为诊断: 占比接近 0 说明那一帧
-    残虹不在场/没有图标, 不是真的白 E。
+    每次轮询截游戏窗口客户区 -> 在模板标注框附近匹配两个模板:
+      - 两个模板里分数更高的那个, 且 >= SKILL_STATE_MIN_CONF -> 就是那个状态
+        (金 E 图标有亮度动画, 绝对阈值 0.7 会把暗相位误报成白, 所以用相对比较);
+      - 当前状态还站得住(分数 >= 下限 且 不低于挑战者 - SKILL_STATE_SWITCH_MARGIN)就不切;
+      - 两个都不够 -> white(初始状态, 没有对应模板) / none(框内几乎没有亮像素, 残虹不在场)。
+    同时记录模板框内近白像素占比(white_ratio)作为判据和诊断。
     """
 
     def __init__(
@@ -326,6 +333,7 @@ class SkillMonitor:
         self._thread = None
         self._feature_set = None
         self._capture = GameCapture()
+        self._state_feature = None
         self._log = None
 
     def start(self):
@@ -474,12 +482,23 @@ class SkillMonitor:
         self.scores = scores
         self.white_ratio = self._white_ratio(frame)
         best = max(scores, key=scores.get) if scores else None
-        if best is not None and scores[best] >= self.threshold:
+        best_score = scores.get(best, 0.0) if best is not None else 0.0
+        if self._state_feature is not None and self._state_feature in scores:
+            current_score = scores[self._state_feature]
+            if (
+                current_score >= SKILL_STATE_MIN_CONF
+                and current_score >= best_score - SKILL_STATE_SWITCH_MARGIN
+            ):
+                best, best_score = self._state_feature, current_score
+        if best is not None and best_score >= SKILL_STATE_MIN_CONF:
             state = SKILL_STATE_LABELS.get(best, best)
+            self._state_feature = best
         elif self.white_ratio >= SKILL_WHITE_RATIO_MIN:
             state = SKILL_STATE_WHITE
+            self._state_feature = None
         else:
             state = SKILL_STATE_NONE
+            self._state_feature = None
         return state, scores
 
     def _white_ratio(self, frame):
