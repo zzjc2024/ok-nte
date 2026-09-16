@@ -33,6 +33,7 @@ class HoldResult(Enum):
     GOLD = "gold"  # 金 E 出现, 正常
     INTERRUPTED = "interrupted"  # 被新攻击警报打断, 上层负责重新闪避
     NO_GOLD = "no_gold"  # 到上限都没出金 E
+    DODGE = "dodge"  # 长按期间闪避触发了(攻击被打断), 不是异常: 点左键 -> 等反击动画 -> 重打长按
     HANDLED = "handled"  # 成功闪避的反击路径已经自己打完二连, 上层不要再补
 
 _COMBO_LOG_KEYWORDS = (
@@ -128,7 +129,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     OPENER_COMBAT_LOST_GRACE = 1.5
     SOUND_IMMEDIATE_SPAM_TIME = 1.2
     SOUND_SUCCESS_CLICK_DOWN = 0.08
-    SOUND_SUCCESS_WAIT = 0.18
+    # 闪避反击动画时长: 点完左键要等它放完, 期间长按普攻不生效(会不出金 E 而被误判异常)。
+    # 手动实测"闪避成功音 -> 开始长按"中位 0.46s, 减去点按 0.08s 约 0.38s。未实测校准。
+    DODGE_COUNTER_WAIT = 0.35
     SCRIPT_TICK = 0.05
 
     # 必须与 BaseCombatTask.refresh_cd() 里的 OCR 区域保持一致
@@ -152,6 +155,10 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._alert_interrupt = threading.Event()
         self._dodge_motion_heard = threading.Event()
         self._dodge_success_heard = threading.Event()
+        # 最近一次听到闪避(动作音/成功音)的时刻, 声音线程写, 主线程读:
+        # 长按期间它变大 = 这次长按被闪避打断了, 不能按"没掉血"抛异常。
+        self._dodge_heard_at = 0.0
+        self._holding = False
         self._combat_state_logged_at = 0.0
         self._q_wait_attack_at = 0.0
         self._opener_lost_since = 0.0
@@ -236,6 +243,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._alert_interrupt.clear()
         self._dodge_motion_heard.clear()
         self._dodge_success_heard.clear()
+        self._dodge_heard_at = 0.0
+        self._holding = False
         self._opener_lost_since = 0.0
         self._q_wait_attack_at = 0.0
 
@@ -675,12 +684,19 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         重按会白等 1~2s, 限时关卡里等于直接失败。
 
         - 掉血 = 大概率被打断 -> 连按 shift 直到闪避真的触发, 然后重打长按;
-        - 没掉血 = 状态异常 -> 抛异常停任务。
+        - 长按期间闪避触发 = 普攻被闪避动画打断, **不是异常** ->
+          点左键触发闪避反击 -> 等反击动画 -> 重打长按;
+        - 没掉血也没闪避 = 状态异常 -> 抛异常停任务。
         """
         damaged = False
         for dodges in range(1, self.COMBO_DODGE_RETRY_MAX + 1):
             result, press_damaged = self._hold_until_gold(interrupt_event=interrupt_event)
             damaged = damaged or press_damaged
+            if result is HoldResult.DODGE:
+                if self._recover_from_dodge():
+                    return HoldResult.HANDLED
+                damaged = False
+                continue
             if result is not HoldResult.NO_GOLD:
                 return result
             if not damaged:
@@ -697,6 +713,21 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._raise_combo_anomaly(
             f"zankou gold E still missing after {self.COMBO_DODGE_RETRY_MAX} dodges"
         )
+
+    def _recover_from_dodge(self):
+        """长按期间闪避触发后的恢复: 点左键触发闪避反击 -> 等反击动画 -> 重打长按.
+
+        返回 True = 等待期间"闪避成功音"的反击路径已经接管并自己打完二连, 上层不要再补。
+        """
+        self._set_action_phase("dodge_retry")
+        self._dodge_success_heard.clear()
+        logger.info("zankou hold interrupted by dodge, counter attack then retry combo")
+        self.click(down_time=self.SOUND_SUCCESS_CLICK_DOWN)
+        self.sleep(self.DODGE_COUNTER_WAIT)
+        if self._dodge_success_heard.is_set():
+            logger.info("dodge success reaction took over during the counter wait")
+            return True
+        return False
 
     def _dodge_until_triggered(self):
         """连按闪避(shift)直到听到"闪避动作音", 确认闪避真的触发了.
@@ -790,6 +821,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         只取首尾两次会出现"掉血-回血-采样"而看不到掉血)。
         """
         interrupted = False
+        dodged = False
         damaged = False
         health_peak = None
         health_samples = 0
@@ -798,6 +830,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             logger.info(f"zankou wait entry skill {wait:.2f}s before combo")
             self.sleep(wait)
         self._entry_skill_until = 0.0
+        hold_start = time.time()
+        self._holding = True
         self.mouse_down()
         gold = False
         best_conf = 0.0
@@ -810,6 +844,10 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 while time.time() < max_until:
                     if interrupt_event is not None and interrupt_event.is_set():
                         interrupted = True
+                        break
+                    # 长按期间闪避触发(动作音/成功音) -> 普攻被打断, 不是异常
+                    if self._dodge_heard_at > hold_start:
+                        dodged = True
                         break
                     box = self.find_one(Labels.zankou_skill_gold, threshold=0.0)
                     conf = box.confidence if box else 0.0
@@ -827,10 +865,14 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                             damaged = True
                     self.sleep(self.COMBO_POLL_INTERVAL)
         finally:
+            self._holding = False
             self.mouse_up()
         if interrupted:
             logger.info("zankou combo hold interrupted by new attack alert")
             return HoldResult.INTERRUPTED, damaged
+        if dodged:
+            logger.info("zankou combo hold interrupted by dodge")
+            return HoldResult.DODGE, damaged
         if gold:
             logger.info(f"zankou gold E detected, conf={best_conf:.3f}")
             return HoldResult.GOLD, damaged
@@ -1198,11 +1240,17 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     def _sound_dodge_success_action(self):
         """听到"闪避成功音"后的反击.
 
-        残虹: 点按左键 -> 等 SOUND_SUCCESS_WAIT -> 残虹二连.
+        残虹: 点按左键 -> 等 DODGE_COUNTER_WAIT(闪避反击动画) -> 残虹二连.
               二连长按期间若又听到攻击警报, 立即打断: 闪避 -> 点按左键 -> 再等 -> 再打二连。
         其他角色: 保持原逻辑(连点左键+连点切人键), 随后主循环切残虹打二连。
         """
         self._dodge_success_heard.set()
+        self._dodge_heard_at = time.time()
+        if self._holding:
+            # 二连长按正在进行: 交给长按自己收尾(打断 -> 点左键 -> 等反击动画 -> 重打),
+            # 这里再点一次左键会和它抢鼠标, 把长按按废。
+            logger.info("dodge success during combo hold, leave the reaction to the hold")
+            return
         current = self.get_current_char(raise_exception=False)
         with self.skip_sleep_checks() as skip:
             skip.all = True
@@ -1213,7 +1261,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             while True:
                 self._alert_interrupt.clear()
                 self.click(down_time=self.SOUND_SUCCESS_CLICK_DOWN)
-                time.sleep(self.SOUND_SUCCESS_WAIT)
+                time.sleep(self.DODGE_COUNTER_WAIT)
                 if not self._zankou_combo_interruptible():
                     return
                 logger.info("sound success combo interrupted, dodge then retry")
@@ -1226,6 +1274,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
 
     def on_dodge_motion_sound(self):
         """闪避动作音回调(在声音监听线程上): 说明闪避真的触发了."""
+        self._dodge_heard_at = time.time()
         self._dodge_motion_heard.set()
 
     def _sound_immediate_reaction(self):

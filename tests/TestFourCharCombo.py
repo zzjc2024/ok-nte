@@ -1,0 +1,86 @@
+import threading
+import time
+import unittest
+from unittest.mock import Mock
+
+from src.combat.BaseCombatTask import SleepCheckSkip
+from src.tasks.trigger.FourCharComboTask import (
+    FourCharComboTask,
+    HoldResult,
+    ZankouComboAnomaly,
+)
+
+
+class TestFourCharCombo(unittest.TestCase):
+    """回归: 长按期间闪避触发不能被当成"没掉血 + 没金 E"的异常."""
+
+    def setUp(self):
+        task = object.__new__(FourCharComboTask)
+        task.sleep_check_skip = SleepCheckSkip()
+        task.COMBO_HOLD_MIN = 0.0
+        task.COMBO_HOLD_MAX = 0.05
+        task._entry_skill_until = 0.0
+        task._dodge_heard_at = 0.0
+        task._holding = False
+        task._dodge_success_heard = threading.Event()
+        task.sleep = Mock()
+        task.mouse_down = Mock()
+        task.mouse_up = Mock()
+        task._set_action_phase = Mock()
+        task.click = Mock()
+        task.find_one = Mock(return_value=None)
+        task._health_pixels = Mock(return_value=300)
+        task._recover_from_dodge = Mock(return_value=False)
+        task._raise_combo_anomaly = Mock(side_effect=ZankouComboAnomaly("anomaly"))
+        self.task = task
+
+    def test_hold_returns_dodge_when_dodge_heard_during_hold(self):
+        def find_one(*args, **kwargs):
+            self.task._dodge_heard_at = time.time() + 1
+            return None
+
+        self.task.find_one = Mock(side_effect=find_one)
+
+        result, damaged = self.task._hold_until_gold()
+
+        self.assertIs(result, HoldResult.DODGE)
+        self.assertFalse(damaged)
+        self.assertFalse(self.task._holding)
+
+    def test_hold_without_gold_or_dodge_returns_no_gold(self):
+        result, damaged = self.task._hold_until_gold()
+
+        self.assertIs(result, HoldResult.NO_GOLD)
+        self.assertFalse(damaged)
+        self.assertFalse(self.task._holding)
+
+    def test_dodge_hold_recovers_instead_of_raising_anomaly(self):
+        self.task._hold_until_gold = Mock(return_value=(HoldResult.DODGE, False))
+        self.task._recover_from_dodge = Mock(return_value=True)
+
+        self.assertIs(self.task._zankou_hold_with_recovery(), HoldResult.HANDLED)
+
+        self.task._recover_from_dodge.assert_called_once_with()
+        self.task._raise_combo_anomaly.assert_not_called()
+
+    def test_no_gold_and_no_damage_still_raises_anomaly(self):
+        self.task._hold_until_gold = Mock(return_value=(HoldResult.NO_GOLD, False))
+
+        with self.assertRaises(ZankouComboAnomaly):
+            self.task._zankou_hold_with_recovery()
+
+        self.task._raise_combo_anomaly.assert_called_once()
+
+    def test_dodge_success_reaction_defers_to_active_hold(self):
+        self.task._holding = True
+        self.task.get_current_char = Mock()
+
+        self.task._sound_dodge_success_action()
+
+        self.assertTrue(self.task._dodge_success_heard.is_set())
+        self.task.click.assert_not_called()
+        self.task.get_current_char.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
