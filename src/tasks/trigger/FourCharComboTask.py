@@ -41,6 +41,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     Q_DOUBLE_TIMEOUT = 8.0
     Q_PRESS_INTERVAL = 0.12
     ENTRY_SKILL_WAIT = 1.6
+    SKILL_REGISTER_TIMEOUT = 1.0
+    DAFFODILL_SKILL_REGISTER_TIMEOUT = 0.5
     CONTROLLABLE_TIMEOUT = 10.0
     ZANKOU_Q_READY_WINDOW = 2.0
     SOUND_REACTION_DAFFODILL_TIME = 1.0
@@ -177,7 +179,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         logger.info(f"precombat gold E detected, conf={conf:.3f}, press E and switch daffodill")
         self._set_action_phase("precombat_gold_e")
         self._opener_gold_e_done = True
-        self.zankou.click_skill()
+        self._skill_until_registered(self.zankou)
         self._switch_to(self.daffodill)
         self._precombat_daffodill_q()
 
@@ -293,11 +295,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 self._cast_q(self.daffodill)
 
             self._switch_to(self.iroi)
-            self.iroi.click_skill()
+            self._skill_until_registered(self.iroi)
 
             self._switch_to(self.sakiri)
             self._cast_q(self.sakiri)
-            self.sakiri.click_skill()
+            self._skill_until_registered(self.sakiri)
 
             self._switch_to(self.zankou)
             self._zankou_double_q()
@@ -319,6 +321,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
 
             iroi = self.iroi
             self._switch_to(iroi)
+            self._skill_until_registered(iroi)
             if not iroi.ultimate_available() and not self._pad_until_q(iroi):
                 return
             self._iroi_q_funnel()
@@ -328,7 +331,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             if not sakiri.ultimate_available() and not self._pad_until_q(sakiri):
                 return
             self._cast_q(sakiri)
-            sakiri.click_skill()
+            self._skill_until_registered(sakiri)
 
             self._switch_to(self.zankou)
             target = self._zankou_fixed_step()
@@ -358,7 +361,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._set_action_phase("daffodill_window")
         start = time.time()
         if daffodill.skill_available():
-            self._send_skill_once(daffodill)
+            self._skill_until_registered(daffodill, self.DAFFODILL_SKILL_REGISTER_TIMEOUT)
         while self.in_combat():
             self._maybe_handle_sound_counter()
             if daffodill.ultimate_available():
@@ -367,13 +370,30 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             if time.time() - start >= self.DAFFODILL_FIELD_TIME:
                 return
             if daffodill.skill_available():
-                self._send_skill_once(daffodill)
+                self._skill_until_registered(daffodill, self.DAFFODILL_SKILL_REGISTER_TIMEOUT)
             self.click()
             self.sleep(0.1)
 
-    def _send_skill_once(self, char):
-        """非阻塞发送一次 E, 避免 click_skill() 的长时间阻塞拖垮在场窗口计时."""
-        char.send_skill_key(down_time=0.05)
+    def _skill_until_registered(self, char, timeout=None):
+        """连按 E 直到技能进入 CD(已释放); 观察到 CD 即可切人, 不等动画收尾.
+
+        E 释放后不打断动作, 所以只要 CD 出现就认为放出去了, 立即返回便于切人。
+        """
+        if timeout is None:
+            timeout = self.SKILL_REGISTER_TIMEOUT
+        if char.has_cd("skill"):
+            return True
+        deadline = time.time() + timeout
+        with self.skip_sleep_checks() as skip:
+            skip.check_combat = True
+            while time.time() < deadline:
+                char.send_skill_key(down_time=0.05)
+                self.sleep(0.05)
+                if char.has_cd("skill"):
+                    logger.info(f"{char} skill registered")
+                    return True
+        logger.warning(f"{char} skill not registered within {timeout}s")
+        return False
 
     # ------------------------------------------------------------ pad loops
 
@@ -392,7 +412,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     def _zankou_gold_e(self):
         self._set_action_phase("zankou_gold_e")
         self._hold_until_gold()
-        self.zankou.click_skill()
+        self._skill_until_registered(self.zankou)
 
     def _zankou_combo(self):
         """残虹二连: 长按轮询金E -> 松开 -> 等 0.1s -> 单击左键 -> 等 0.05s."""
@@ -625,7 +645,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 self._cast_q(daffodill)
                 break
             if daffodill.skill_available():
-                self._send_skill_once(daffodill)
+                self._skill_until_registered(daffodill, self.DAFFODILL_SKILL_REGISTER_TIMEOUT)
             self.click()
             self.sleep(0.1)
         self._switch_to(self.zankou)
