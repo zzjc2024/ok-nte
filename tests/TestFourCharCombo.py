@@ -81,6 +81,33 @@ class TestFourCharCombo(unittest.TestCase):
         self.task.click.assert_not_called()
         self.task.get_current_char.assert_not_called()
 
+    def _conf_sequence(self, values):
+        remaining = list(values)
+
+        def find_one(*args, **kwargs):
+            if not remaining:
+                return None
+            return Mock(confidence=remaining.pop(0))
+
+        return Mock(side_effect=find_one)
+
+    def test_second_gold_needs_gold_lost_then_gold_again(self):
+        self.task.COMBO_SECOND_GOLD_MAX = 0.5
+        self.task.find_one = self._conf_sequence([0.85, 0.50, 0.10, 0.80])
+
+        result, damaged = self.task._hold_until_gold(require_second_gold=True)
+
+        self.assertIs(result, HoldResult.GOLD)
+        self.assertFalse(damaged)
+
+    def test_second_gold_missing_when_first_gold_never_lost(self):
+        self.task.COMBO_SECOND_GOLD_MAX = 0.05
+        self.task.find_one = self._conf_sequence([0.85, 0.85, 0.85])
+
+        result, _damaged = self.task._hold_until_gold(require_second_gold=True)
+
+        self.assertIs(result, HoldResult.NO_GOLD)
+
 
 if __name__ == "__main__":
     unittest.main()

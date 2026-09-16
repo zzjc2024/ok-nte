@@ -107,6 +107,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     # 金 E 图标有亮度动画: 实测金状态 gold 模板分数在 0.45~0.86 来回跳, 白/紫状态时 <= 0.29。
     # 0.7 会漏掉暗相位(晚 0.1~0.3s 才认出金 E), 0.45 更稳也更快。
     GOLD_THRESHOLD = 0.45
+    # 判"金 E 已经没了"(蓄力攻击吃掉了第一次金 E)用更低的值, 免得被金 E 的暗相位骗到
+    GOLD_LOST_THRESHOLD = 0.35
+    # 闪避反击后的长按要等"第二次金 E": 第一次金 E 结束后蓄力约 0.7s 才会再变金,
+    # 手动实测(3 次)从长按到第二次金 E 约 1.26s, 松手在 1.33~1.38s。
+    COMBO_SECOND_GOLD_MAX = 1.8
     DAFFODILL_FIELD_TIME = 1.5
     PAD_FIELD_TIME = 1.5
     IROI_FUNNEL_POST_SLEEP = 0.3
@@ -666,10 +671,15 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self.click()
         self.sleep(self.COMBO_CLICK_GAP)
 
-    def _zankou_combo_interruptible(self):
-        """残虹二连(长按期间可被新攻击警报打断); 返回 True 表示被打断."""
+    def _zankou_combo_interruptible(self, require_second_gold=False):
+        """残虹二连(长按期间可被新攻击警报打断); 返回 True 表示被打断.
+
+        `require_second_gold=True` 时等的是"闪避攻击之后的第二次金 E"(见 §4.1 机制)。
+        """
         self._set_action_phase("zankou_combo")
-        result = self._zankou_hold_with_recovery(self._alert_interrupt)
+        result = self._zankou_hold_with_recovery(
+            self._alert_interrupt, require_second_gold=require_second_gold
+        )
         if result is HoldResult.INTERRUPTED:
             return True
         if result is HoldResult.HANDLED:
@@ -679,7 +689,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self.sleep(self.COMBO_CLICK_GAP)
         return False
 
-    def _zankou_hold_with_recovery(self, interrupt_event=None):
+    def _zankou_hold_with_recovery(self, interrupt_event=None, require_second_gold=False):
         """长按轮询金 E; 没出金 E 时按"是否掉血"分流, 返回最终结果.
 
         **不重按**: 长按起点由 `_switch_to` 的入场技预测 (`_entry_skill_until`) 保证;
@@ -687,17 +697,22 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
 
         - 掉血 = 大概率被打断 -> 连按 shift 直到闪避真的触发, 然后重打长按;
         - 长按期间闪避触发 = 普攻被闪避动画打断, **不是异常** ->
-          点左键触发闪避反击 -> 等反击动画 -> 重打长按;
+          点左键触发闪避反击 -> 等反击动画 -> 重打长按(此时等第二次金 E);
         - 没掉血也没闪避 = 状态异常 -> 抛异常停任务。
         """
         damaged = False
+        second_gold = require_second_gold
         for dodges in range(1, self.COMBO_DODGE_RETRY_MAX + 1):
-            result, press_damaged = self._hold_until_gold(interrupt_event=interrupt_event)
+            result, press_damaged = self._hold_until_gold(
+                interrupt_event=interrupt_event, require_second_gold=second_gold
+            )
             damaged = damaged or press_damaged
             if result is HoldResult.DODGE:
                 if self._recover_from_dodge():
                     return HoldResult.HANDLED
                 damaged = False
+                # 闪避反击之后要等的是第二次金 E
+                second_gold = True
                 continue
             if result is not HoldResult.NO_GOLD:
                 return result
@@ -816,11 +831,16 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             self.sleep(0.1)
         logger.info(f"four char combo cycle full ratio={self.cycle_ratio():.2f}")
 
-    def _hold_until_gold(self, interrupt_event=None):
+    def _hold_until_gold(self, interrupt_event=None, require_second_gold=False):
         """长按轮询金 E; 返回 (HoldResult, damaged).
 
         damaged 由长按期间的**多次**血条采样得出 (伊洛伊大招会在后台回血,
         只取首尾两次会出现"掉血-回血-采样"而看不到掉血)。
+
+        `require_second_gold=True`(闪避反击后)等的是**第二次**金 E:
+          闪避攻击带来的第一次金 E 不能用 -> 长按后闪避攻击动作结束会自动蓄力,
+          蓄力一开始金 E 就消失 -> 蓄力约 0.7s 完成后再变金, 这一次点按才能稳定
+          打出脱手攻击。所以这里按 gold -> not gold -> gold 三段等。
         """
         interrupted = False
         dodged = False
@@ -837,12 +857,15 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self.mouse_down()
         gold = False
         best_conf = 0.0
+        phase = 0  # 0=等第一次金 E, 1=等金 E 消失(蓄力开始), 2=等第二次金 E
         try:
             with self.skip_sleep_checks() as skip:
                 skip.check_combat = True
                 start = time.time()
-                min_until = start + self.COMBO_HOLD_MIN
-                max_until = start + self.COMBO_HOLD_MAX
+                min_until = start + (0.0 if require_second_gold else self.COMBO_HOLD_MIN)
+                max_until = start + (
+                    self.COMBO_SECOND_GOLD_MAX if require_second_gold else self.COMBO_HOLD_MAX
+                )
                 while time.time() < max_until:
                     if interrupt_event is not None and interrupt_event.is_set():
                         interrupted = True
@@ -855,7 +878,22 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                     conf = box.confidence if box else 0.0
                     if conf > best_conf:
                         best_conf = conf
-                    if time.time() >= min_until and conf >= self.GOLD_THRESHOLD:
+                    if require_second_gold:
+                        if phase == 0 and conf >= self.GOLD_THRESHOLD:
+                            phase = 1
+                            logger.info(
+                                f"second gold: first gold E seen (dodge attack), conf={conf:.3f}"
+                            )
+                        elif phase == 1 and conf < self.GOLD_LOST_THRESHOLD:
+                            phase = 2
+                            logger.info(
+                                f"second gold: first gold E gone (charge started), conf={conf:.3f}"
+                            )
+                        elif phase == 2 and conf >= self.GOLD_THRESHOLD:
+                            gold = True
+                            logger.info(f"second gold: second gold E ready, conf={conf:.3f}")
+                            break
+                    elif time.time() >= min_until and conf >= self.GOLD_THRESHOLD:
                         gold = True
                         break
                     pixels = self._health_pixels()
@@ -880,7 +918,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             return HoldResult.GOLD, damaged
         logger.warning(
             f"zankou gold E not detected, best conf={best_conf:.3f} "
-            f"(hold={self.COMBO_HOLD_MAX}s, health_samples={health_samples}, "
+            f"(hold={self.COMBO_HOLD_MAX}s, second_gold={require_second_gold}, "
+            f"phase={phase}, health_samples={health_samples}, "
             f"health_peak={health_peak}, damaged={damaged})"
         )
         if health_samples == 0:
@@ -1264,7 +1303,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 self._alert_interrupt.clear()
                 self.click(down_time=self.SOUND_SUCCESS_CLICK_DOWN)
                 time.sleep(self.DODGE_COUNTER_WAIT)
-                if not self._zankou_combo_interruptible():
+                if not self._zankou_combo_interruptible(require_second_gold=True):
                     return
                 logger.info("sound success combo interrupted, dodge then retry")
                 self._set_action_phase("sound_success_interrupt")
