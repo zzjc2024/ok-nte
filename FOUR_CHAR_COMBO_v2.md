@@ -47,7 +47,8 @@
 2. **连按 Q**（`send_ultimate_key` 每 ~`Q_PRESS_INTERVAL=0.12s`，冷却中按键被忽略）；
 3. 数**大招动画次数**：`is_in_team()` True→False 记一次，数到 **2 次**才停（第一段、第二段特写）；
 4. `_wait_in_team(CONTROLLABLE_TIMEOUT)` 等第二段动画结束；
-5. `_wait_cd_ticking()` 等右下角 Q 冷却数字开始变化（实测动画结束后约 1.5s 才开始跳），之后上层才做二连。
+5. `_wait_cd_at_most(ZANKOU_Q_CD_COMBO_READY=19.7)` 等右下角 Q 冷却数字降到 **≤19.7** 才让上层做二连。
+   - **不要只等"CD 首次变小"**：一段 Q 结束、二段 Q 之前 CD 会先小幅跳一次，只等首次变小会让二连提前好几秒（表现为"长按太早、没生效"）。二段 Q 特写期间 CD 是冻结的，特写结束后才继续往下跳，所以用固定上限 19.7。
 
 > 依据：`BaseChar._wait_action_animation` 就是用 `is_in_team` 判断大招动画进入/脱离；多场日志证实特写期间 `is_in_team` 连续 False ~2s。
 
@@ -129,7 +130,7 @@
 | `_zankou_double_q` | 双 Q（连按 Q + 数大招动画到 2 次 + 等 CD 跳） |
 | `_cast_q` / `_press_q_ready` / `_press_q_until_registered` / `_q_registered` | 单 Q：连按到注册 + 等可控 |
 | `_iroi_q_funnel` / `_wait_iroi_cutscene` | 浮游炮 / 等脱离大招动画 |
-| `_wait_controllable` / `_wait_cd_ticking` / `_wait_in_team` | 可控 / CD 跳 / 脱离动画 |
+| `_wait_controllable` / `_wait_cd_at_most` / `_wait_in_team` | 可控 / 等 Q 冷却降到指定值 / 脱离动画 |
 | `_sound_dodge_action` / `_sound_counter_action` | 听到攻击警报：只按闪避（反击已改由闪避成功音触发） |
 | `_sound_dodge_success_action` | 听到闪避成功音：残虹 → 点左键 0.08s + 等 0.18s + 二连；非残虹 → `_sound_immediate_reaction` |
 | `_sound_immediate_reaction` / `_maybe_handle_sound_counter` | 非残虹反击：连点左键 + 连点切人键，随后主循环切残虹打二连 |
@@ -148,7 +149,7 @@ Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTER
 ENTRY_SKILL_WAIT=1.6  SUPPRESS_SWITCH_CLICK=True  SWITCH_CONFIRM_TIMEOUT=3.0
 SKILL_REGISTER_TIMEOUT=2.0  DAFFODILL_SKILL_REGISTER_TIMEOUT=0.5
 CYCLE_BAR_VISIBLE_MIN_PIXELS=20  IROI_FUNNEL_ANIMATION_TIMEOUT=5.0
-CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
+CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0  ZANKOU_Q_CD_COMBO_READY=19.7
 SOUND_IMMEDIATE_SPAM_TIME=1.2  SOUND_SUCCESS_CLICK_DOWN=0.08  SOUND_SUCCESS_WAIT=0.18  SCRIPT_TICK=0.05
 ACTION_LOG_PATH=logs/four_combo_actions.log
 ```

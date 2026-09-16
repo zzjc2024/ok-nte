@@ -92,6 +92,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     DAFFODILL_SKILL_REGISTER_TIMEOUT = 0.5
     CONTROLLABLE_TIMEOUT = 10.0
     ZANKOU_Q_READY_WINDOW = 2.0
+    ZANKOU_Q_CD_COMBO_READY = 19.7
     SOUND_IMMEDIATE_SPAM_TIME = 1.2
     SOUND_SUCCESS_CLICK_DOWN = 0.08
     SOUND_SUCCESS_WAIT = 0.18
@@ -612,7 +613,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         else:
             logger.warning(f"zankou double q incomplete, animations={animations}")
         self._wait_in_team(timeout=self.CONTROLLABLE_TIMEOUT)
-        self._wait_cd_ticking()
+        self._wait_cd_at_most(self.ZANKOU_Q_CD_COMBO_READY)
 
     def _wait_in_team(self, timeout=2.0):
         """等脱离大招动画(is_in_team 恢复)."""
@@ -758,19 +759,26 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         logger.warning(f"wait controllable timeout {char}")
         return False
 
-    def _wait_cd_ticking(self):
+    def _wait_cd_at_most(self, limit):
+        """等大招 CD 数字降到 limit 及以下.
+
+        二段 Q 特写期间 CD 数字是冻结的; 特写结束后才会继续往下跳。
+        只等"首次变小"会被一段 Q 与二段 Q 之间的那一小跳提前触发, 所以用固定上限。
+        """
         start = time.time()
-        previous = None
+        last_logged = None
         with self.skip_sleep_checks() as skip:
             skip.check_combat = True
             while time.time() - start < self.CONTROLLABLE_TIMEOUT:
-                remaining = self.get_cd("ultimate")
-                if remaining > 0 and previous is not None and remaining < previous - 0.001:
+                cd = self.get_cd("ultimate")
+                if 0 < cd <= limit:
+                    logger.info(f"zankou q cd {cd:.2f} <= {limit}, ready for combo")
                     return True
-                if remaining > 0:
-                    previous = remaining
+                if cd != last_logged:
+                    logger.info(f"zankou q cd {cd:.2f} waiting for <= {limit}")
+                    last_logged = cd
                 self.sleep(self.SCRIPT_TICK)
-        logger.warning("wait cd ticking timeout")
+        logger.warning(f"wait zankou q cd <= {limit} timeout")
         return False
 
     def _q_button_lit(self):
