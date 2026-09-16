@@ -31,6 +31,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     COMBO_HOLD_MIN = 0.7
     COMBO_HOLD_MAX = 2.0
     COMBO_POLL_INTERVAL = 0.05
+    COMBO_RELEASE_GAP = 0.1
     COMBO_CLICK_GAP = 0.05
     GOLD_THRESHOLD = 0.7
     DAFFODILL_FIELD_TIME = 2.0
@@ -353,10 +354,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 return
 
     def _daffodill_window(self, daffodill):
+        """达芙蒂尔在场窗口: E 能放就放(非阻塞), 到 DAFFODILL_FIELD_TIME 或 Q 可用后离开."""
         self._set_action_phase("daffodill_window")
         start = time.time()
         if daffodill.skill_available():
-            daffodill.click_skill()
+            self._send_skill_once(daffodill)
         while self.in_combat():
             self._maybe_handle_sound_counter()
             if daffodill.ultimate_available():
@@ -365,9 +367,13 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             if time.time() - start >= self.DAFFODILL_FIELD_TIME:
                 return
             if daffodill.skill_available():
-                daffodill.click_skill()
+                self._send_skill_once(daffodill)
             self.click()
             self.sleep(0.1)
+
+    def _send_skill_once(self, char):
+        """非阻塞发送一次 E, 避免 click_skill() 的长时间阻塞拖垮在场窗口计时."""
+        char.send_skill_key(down_time=0.05)
 
     # ------------------------------------------------------------ pad loops
 
@@ -389,9 +395,10 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self.zankou.click_skill()
 
     def _zankou_combo(self):
-        """残虹二连: 长按轮询金E -> 松开 -> 单击左键 -> 等 0.05s."""
+        """残虹二连: 长按轮询金E -> 松开 -> 等 0.1s -> 单击左键 -> 等 0.05s."""
         self._set_action_phase("zankou_combo")
         self._hold_until_gold()
+        self.sleep(self.COMBO_RELEASE_GAP)
         self.click()
         self.sleep(self.COMBO_CLICK_GAP)
 
@@ -608,6 +615,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             self._in_sound_reaction = False
 
     def _sound_reaction_zankou(self):
+        """残虹触发声音反击: 切达芙蒂尔, Q/E 能放就放, SOUND_REACTION_DAFFODILL_TIME 后切回残虹."""
         self._set_action_phase("sound_zankou")
         self._switch_to(self.daffodill)
         daffodill = self.daffodill
@@ -617,7 +625,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 self._cast_q(daffodill)
                 break
             if daffodill.skill_available():
-                daffodill.click_skill()
+                self._send_skill_once(daffodill)
             self.click()
             self.sleep(0.1)
         self._switch_to(self.zankou)

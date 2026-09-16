@@ -52,7 +52,7 @@
 
 ### 1.3 残虹二连（核心操作）
 
-**长按左键（最低 0.7s）→ 检测到 E 变金色 → 松开 → 单击左键 → 等 0.05s → 立即切人。**
+**长按左键（最低 0.7s）→ 检测到 E 变金色 → 松开 → 等 0.1s → 单击左键 → 等 0.05s → 立即切人。**
 - 闪避反击导致 E 变金也走这套。
 - 长按过早/过晚都不行；没检测到金 E 不许切人（当前实现会 warning，但仍会继续，需实测调）。
 
@@ -137,7 +137,8 @@
 | `click` / `send_key` / `send_key_down` / `send_key_up` / `mouse_down` / `mouse_up` | 覆写以记录真实键鼠操作后转发 `super()` |
 | `_loop_once` | 1.2 的主循环一轮 |
 | `_zankou_fixed_step` | 早雾之后的残虹固定步骤（双 Q 只在这里） |
-| `_daffodill_until_cycle_full` / `_daffodill_window` | 达芙蒂尔循环 |
+| `_daffodill_until_cycle_full` / `_daffodill_window` | 达芙蒂尔循环；窗口内 E 用非阻塞 `_send_skill_once`，保证 `DAFFODILL_FIELD_TIME` 计时有效 |
+| `_send_skill_once` | 非阻塞发送一次 E（`send_skill_key`），避免 `click_skill()` 长时间阻塞拖垮在场窗口 |
 | `_pad_until_q` | 伊洛伊/早雾 Q 不可放时的垫刀循环 |
 | `_zankou_gold_e` / `_zankou_combo` | 开局金 E / 残虹二连 |
 | `_hold_until_gold` | 长按轮询金 E（最低 0.7s，最长 2s，记录 conf） |
@@ -151,7 +152,8 @@
 ### 4.2 关键常量（`FourCharComboTask`）
 
 ```
-COMBO_HOLD_MIN=0.7  COMBO_HOLD_MAX=2.0  COMBO_POLL_INTERVAL=0.05  COMBO_CLICK_GAP=0.05
+COMBO_HOLD_MIN=0.7  COMBO_HOLD_MAX=2.0  COMBO_POLL_INTERVAL=0.05
+COMBO_RELEASE_GAP=0.1  COMBO_CLICK_GAP=0.05
 GOLD_THRESHOLD=0.7  DAFFODILL_FIELD_TIME=2.0  IROI_FUNNEL_POST_SLEEP=0.3
 Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTERVAL=0.12
 ENTRY_SKILL_WAIT=1.6  CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
@@ -181,6 +183,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 1. **`is_in_team()` 不能判断大招动画**：NTE 的 Q 特写期间血条斜杠不消失，`is_in_team()` 一直 True → `wait_until(not is_in_team)` 每次超时 2s。已彻底移除基于它的动画等待。
 2. **`check_combat()` 会触发重新索敌**：`_recover_or_end_combat` → `target_enemy` → `middle_click`，打断长按/输入（日志里频繁 `targeting enemy for 3s`）。紧输入序列用 `skip_sleep_checks(check_combat=True)` 跳过战斗检查，但**保留声音抢占**（不动 `sound_combat_context`）。
    - **特写误判打断开局**：`BaseChar.click_skill()` 内部 `sleep` 会走 `sleep_check → check_combat`，而 `skip_sleep_checks` 覆盖不到它。大招特写期间战斗检测会短暂判脱战，`target_enemy` 空转 ~3s 后失败抛 `NotInCombatException`，导致 `_opener` 从早雾 Q 处中断并整段重跑（表现为“早雾 Q 接不上残虹双 Q，要等一会”）。修法：`_opener` / `_loop_once` 的紧输入序列用 `_suspend_combat_check()` 抑制 `check_combat`（覆写 `check_combat`，仅本任务生效），长循环 `_daffodill_until_cycle_full` 不抑制，仍靠 `while in_combat()` 检测脱战。
+3. **`click_skill()` 会阻塞在场窗口**：`BaseChar.click_skill()` 连按 E 直到技能不可用（最长 `SKILL_TIME_OUT=15s`）。在 `_daffodill_window`（2s）/ `_sound_reaction_zankou`（1s）里直接调用会把窗口计时卡死，导致达芙蒂尔一直呆在场上、无法按时切回残虹（实测声音反击后达芙蒂尔 E 连点 ~1.7s 直到战斗结束）。修法：窗口内改用 `_send_skill_once()`（`send_skill_key` 发一次即返回）。
 3. **Q 会被入场技/切人动画吃掉**：Q 一律“连按到注册”（`_press_q_until_registered`），不要只按一次。
 4. **环合满切人触发入场技**：`_switch_to` 在切人**之前**读上一任 `is_cycle_full()`；不是切完再读残虹自己的。
 5. **切人确认延迟 ~0.3s**；`_switch_to_char` 会反复发切人键直到成功，天然满足“短时间无法切人就连点切人键”。
@@ -201,6 +204,8 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - 入战前预判：未入战且残虹在场时**只轮询检测金 E，不做任何键鼠操作**（长按由玩家自己预判操作），检测到即按 E、切达芙蒂尔、入战前自动放 Q；入战后再从切伊洛伊放 E 继续。`_opener` 会跳过入战前已放的达芙蒂尔 Q。
 - 新增独立轻量键鼠日志 `logs/four_combo_actions.log`（覆写输入方法记录真实操作 + phase 标记），用于复盘每次残虹二连的按键时序。
 - 修复开局/主循环被打断：`_opener` 与 `_loop_once` 的紧输入序列用 `_suspend_combat_check()` 抑制 `check_combat`，避免早雾 Q 特写期间战斗检测误判脱战、`target_enemy` 空转 3s 后打断流程重跑（表现为早雾 Q 接不上残虹双 Q，要等一会）。
+- 残虹二连长按→左键间隔改为 `COMBO_RELEASE_GAP=0.1s`（原几乎 0）。
+- 达芙蒂尔在场窗口的 E 改为非阻塞 `_send_skill_once`，修复声音反击/达芙蒂尔循环里 `click_skill()` 阻塞导致达芙蒂尔卡场、不按时切回残虹。
 
 **实测已知问题（最近一轮日志结论）**：
 - `is_in_team` 动画判断失效 → 已修（移除）。
