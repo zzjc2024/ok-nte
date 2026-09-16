@@ -45,7 +45,7 @@ class SoundListener:
         dodge_success_sample_path: str = "",
         dodge_success_threshold: float = 0.3,
         dodge_motion_sample_paths: Sequence[str] = (),
-        dodge_motion_threshold: float = 0.25,
+        dodge_motion_threshold: float = 0.2,
         expansion_ratio: float = 1.0,
         is_allow_successive_trigger: bool = False,
         process_name: str = default_process_name,
@@ -274,6 +274,10 @@ class SoundListener:
         buffer_pos = 0
         total_written = 0
         samples_since_check = 0
+        peak_dodge = 0.0
+        peak_counter = 0.0
+        peak_success = 0.0
+        peak_motion = 0.0
 
         while self._should_run(stop_event):
             if self._capture is None or not self._capture.is_alive():
@@ -356,29 +360,46 @@ class SoundListener:
                     self._match_normalized(norm_window, motion_waveform),
                 )
 
+            peak_dodge = max(peak_dodge, dodge_score)
+            peak_counter = max(peak_counter, counter_score)
+            peak_success = max(peak_success, dodge_success_score)
+            peak_motion = max(peak_motion, dodge_motion_score)
+
             self._check_triggers(
                 dodge_score, counter_score, dodge_success_score, dodge_motion_score
             )
 
             # self._draw_debug_visual(dodge_score, counter_score)
 
-            self._log_gate.info(
-                "Audio monitoring - dodge_score: {:.4f} (threshold: {}), "
-                "counter_score: {:.4f} (threshold: {}), "
-                "dodge_success_score: {:.4f} (threshold: {}), "
-                "dodge_motion_score: {:.4f} (threshold: {})".format(
+            emitted = self._log_gate.info(
+                "Audio monitoring - "
+                "dodge_score: {:.4f}/peak {:.4f} (threshold: {}), "
+                "counter_score: {:.4f}/peak {:.4f} (threshold: {}), "
+                "dodge_success_score: {:.4f}/peak {:.4f} (threshold: {}), "
+                "dodge_motion_score: {:.4f}/peak {:.4f} (threshold: {})".format(
                     dodge_score,
+                    peak_dodge,
                     self.threshold,
                     counter_score,
+                    peak_counter,
                     self.counter_attack_threshold,
                     dodge_success_score,
+                    peak_success,
                     self.dodge_success_threshold,
                     dodge_motion_score,
+                    peak_motion,
                     self.dodge_motion_threshold,
                 ),
                 interval=self.log_interval,
                 key="audio_monitoring",
             )
+            if emitted:
+                # 峰值为本段区间内的最大值, 用来判断"游戏里这个音到底有多强",
+                # 单看瞬时采样会漏掉 0.2s 的短音效。
+                peak_dodge = 0.0
+                peak_counter = 0.0
+                peak_success = 0.0
+                peak_motion = 0.0
 
     def _check_triggers(
         self, dodge_score, counter_score, dodge_success_score=0.0, dodge_motion_score=0.0
@@ -392,15 +413,17 @@ class SoundListener:
             and dodge_motion_score > self.dodge_motion_threshold
             and now - self._last_dodge_motion_time >= self._dodge_motion_interval
         ):
-            if self.on_dodge_motion_triggered:
-                logger.info(
-                    "Dodge MOTION TRIGGERED! score: {:.4f}, threshold: {}".format(
-                        dodge_motion_score,
-                        self.dodge_motion_threshold,
-                    )
+            # 日志与去重时间戳不放在回调判断里: 回调没接上时也要能看见触发,
+            # 否则现场诊断(游戏里到底有没有闪避动作音)完全没有依据。
+            logger.info(
+                "Dodge MOTION TRIGGERED! score: {:.4f}, threshold: {}".format(
+                    dodge_motion_score,
+                    self.dodge_motion_threshold,
                 )
+            )
+            self._last_dodge_motion_time = now
+            if self.on_dodge_motion_triggered:
                 self.on_dodge_motion_triggered()
-                self._last_dodge_motion_time = now
 
         if (
             not self.is_allow_successive_trigger

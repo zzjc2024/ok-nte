@@ -125,7 +125,7 @@ class SoundCombatContext:
         threshold: float = 0.13,
         counter_attack_threshold: float = 0.12,
         dodge_success_threshold: float = 0.3,
-        dodge_motion_threshold: float = 0.25,
+        dodge_motion_threshold: float = 0.2,
         dodge_action: Optional[Callable] = None,
         counter_action: Optional[Callable] = None,
         dodge_success_action: Optional[Callable] = None,
@@ -433,7 +433,7 @@ class SoundCombatContext:
         dodge_threshold: float,
         counter_threshold: float,
         dodge_success_threshold: float = 0.3,
-        dodge_motion_threshold: float = 0.25,
+        dodge_motion_threshold: float = 0.2,
     ):
         with self._context_lock:
             self._pending_config = (

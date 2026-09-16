@@ -159,6 +159,30 @@ class SoundListenerTests(unittest.TestCase):
         listener._check_triggers(0.5, 0.0, 0.0, 0.0)
         self.assertEqual(events, ["motion", "dodge"])
 
+    def test_dodge_motion_trigger_logs_and_debounces_without_callback(self):
+        # 回调没接上时也要记录触发并更新时间戳, 否则现场无法判断
+        # "游戏里到底有没有闪避动作音"。
+        from src.sound_trigger import SoundListener as listener_module
+
+        class StubListener(listener_module.SoundListener):
+            def _load_samples(self):
+                pass
+
+        listener = StubListener(
+            sample_path="",
+            counter_attack_sample_path="",
+            dodge_motion_sample_paths=[],
+            dodge_motion_threshold=0.2,
+        )
+        with patch.object(listener_module, "logger") as logger_mock:
+            listener._check_triggers(0.0, 0.0, 0.0, 0.5)
+        self.assertTrue(logger_mock.info.called)
+        first_time = listener._last_dodge_motion_time
+        self.assertGreater(first_time, 0.0)
+
+        listener._check_triggers(0.0, 0.0, 0.0, 0.5)
+        self.assertEqual(listener._last_dodge_motion_time, first_time)
+
     def test_dodge_success_trigger_uses_its_own_threshold(self):
         from src.sound_trigger.SoundListener import SoundListener
 
