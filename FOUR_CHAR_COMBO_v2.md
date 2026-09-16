@@ -52,12 +52,16 @@
 1. 切残虹后先 `_wait_in_team(ENTRY_SKILL_WAIT=1.6s)` 等脱离切人/入场动画；
 2. **连按 Q**（`send_ultimate_key` 每 ~`Q_PRESS_INTERVAL=0.12s`，冷却中按键被忽略）；
 3. `_press_q_through_animations()` 依次确认 **4 个阶段**：`enter1`（第 1 段进特写）→ `exit1` → `enter2`（第 2 段进特写）→ `exit2`。每阶段要求 `is_in_team()` 稳定保持 `ANIMATION_STABLE_TIME=0.3s` 才算确认，防止特写期间状态抖动把动画数错；
-4. 4 阶段全部确认后 `_wait_cd_ticking()`：等右下角 Q 冷却数字**首次变小**，然后上层才做二连。
+4. `_wait_double_q_recovery(stage)`：**两个条件必须同时成立**才交回上层做二连（长按）：
+   - **第 2 段** Q 的动画结束：`stage >= 3`（`enter2` 已确认，绝不能拿第 1 段的结束当数），且 `is_in_team()` 稳定 `ANIMATION_STABLE_TIME=0.3s` 回来（排除特写期间的状态抖动）；
+   - Q 冷却的**原始 OCR 数字**真正变小。
 
-> 为什么是"4 阶段确认后再等 CD 变化"，而不是固定 `CD ≤ 19.7` 或"CD 首次变小"：
-> 一段 Q 结束、二段 Q 之前 CD 会先小幅跳一次；如果从双 Q 一开始就盯 CD，会在**第 1 段动画刚结束**时就触发，二连提前好几秒（表现为"长按太早、没生效"）。现在 CD 只在 `exit2` 之后才开始采样，所以看到的一定是二段特写结束、CD 恢复计时后的第一次变化。
-
-> 依据：`BaseChar._wait_action_animation` 就是用 `is_in_team` 判断大招动画进入/脱离；多场日志证实特写期间 `is_in_team` 连续 False ~2s。
+> **坑 A：`get_cd()` 不能用来判断"冷却开始计时"。** `get_cd = cds["ultimate"] - (now - OCR快照时间)`，只要冷却数字还挂在屏幕上，`get_cd` 就会随时间一路变小 —— **即使游戏里冷却被冻结也会"变小"**。所以旧实现 `_wait_cd_ticking()`（比较 `get_cd`）实际只等到"冷却数字第二次可见"，HUD 一回来就触发。游戏在 Q 动画期间把冷却数字**冻结在满值**（日志实证：Q#2 后 3.1s 读到的原始值仍是 `20.0`），所以"原始数字开始变小"才是动画真正结束、冷却开始计时。
+>
+> **坑 B：动画一结束就长按是错的，会早约 2 秒。** 实测手动"双Q → 长按"间隔稳定在 **5.04 / 5.09 / 5.25s**（3 次录制），脚本按旧逻辑只有 **3.09s**。早掉的那 2.0s 长按全程落在动画/收招里，普攻完全不生效 → `zankou gold E not detected, best conf=0.000` → 二连接不上（用户描述"长按早了"）。同理 `_switch_to()` 刚确认就长按（切人确认后 0.001s）也会全空。
+>
+> 依据：`BaseChar._wait_action_animation` 就是用 `is_in_team` 判断大招动画进入/脱离；多场日志证实特写期间 `is_in_team` 连续 False ~2s，且特写期间状态会抖动（所以每阶段都要 0.3s 稳定）。
+> 注：`Q_DOUBLE_TIMEOUT=8.0s` 通常不够确认 `exit2`（双 Q 全程约 11s），日志里常见 `stage=3/4`；二连时机不依赖 `exit2`，`stage>=3` 即可。
 
 ### 1.5 伊洛伊浮游炮（最终实现）
 
@@ -135,11 +139,12 @@
 | `_pad_until_q` | 伊洛伊/早雾 Q 不可放时的垫刀；记录 `_pad_target` 供声音反击用 |
 | `_skill_until_registered` | 只在 E 图标亮时连按 E 到 E 进 CD 即返回（替代阻塞的 `click_skill`） |
 | `_zankou_gold_e` / `_zankou_combo` / `_hold_until_gold` | 开局金 E / 二连 / 长按轮询金 E |
-| `_zankou_double_q` / `_press_q_through_animations` | 双 Q（连按 Q + 确认 enter1/exit1/enter2/exit2 + 等 CD 变化） |
+| `_zankou_double_q` / `_press_q_through_animations` | 双 Q（连按 Q + 确认 enter1/exit1/enter2/exit2），之后交给 `_wait_double_q_recovery` |
 | `_zankou_combo_switch` / `_stay_until_cycle_full` | 切残虹二连后按 `cycle_ratio()` 决定切谁；环合 ≥0.9 时留场打到满 |
 | `_cast_q` / `_press_q_ready` / `_press_q_until_registered` / `_q_registered` | 单 Q：连按到注册 + 等可控 |
 | `_iroi_q_funnel` / `_wait_iroi_cutscene` | 浮游炮 / 等脱离大招动画 |
-| `_wait_controllable` / `_wait_cd_ticking` / `_wait_in_team` | 可控 / 等 Q 冷却首次变小 / 脱离动画 |
+| `_wait_double_q_recovery` / `_raw_ultimate_cd` | 二连前提：第2段Q动画结束 **且** Q冷却原始数字变小（同时成立）/ 读 Q 冷却原始 OCR 值（不扣时间） |
+| `_wait_controllable` / `_wait_in_team` | 可控（冷却变化或 Q 由亮变灭）/ 脱离动画 |
 | `_maybe_log_combat_state` | 低频打印各脱战信号，定位"敌人已死但 in_combat 仍为 True" |
 | `_sound_dodge_action` / `_sound_counter_action` | 听到攻击警报：只按闪避（反击已改由闪避成功音触发） |
 | `_sound_dodge_success_action` | 听到闪避成功音：残虹 → 点左键 0.08s + 等 0.18s + 二连；非残虹 → `_sound_immediate_reaction` |
@@ -195,7 +200,8 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 ### 5.3 技能 / 冷却
 | 方法 | 说明 |
 |---|---|
-| `get_cd(name, char_index)` / `has_cd(name, char_index)` | OCR 右下角 CD 数字（`skill`/`ultimate`，扣冻结时间）；**仅当前角色可靠** |
+| `get_cd(name, char_index)` / `has_cd(name, char_index)` | OCR 右下角 CD 数字（`skill`/`ultimate`，扣冻结时间）；**仅当前角色可靠**。**注意：会随时间漂移，不能判断"冷却是否真的在计时"** |
+| `refresh_cd()` + `task.cds[idx]["ultimate"]` | Q 冷却的**原始 OCR 数字**（不扣时间）；判断"游戏冷却真的开始变小"必须用这个（见 `_raw_ultimate_cd`） |
 | `box_highlighted(name)` | 技能图标白色像素占比（亮/灭） |
 | `available(name, check_color, check_cd)` | 图标亮 **且** 无 CD |
 | `BaseChar.skill_available()` / `ultimate_available()` | 当前角色走 `available`；非当前走 `task.ultimate_available(index)`（模板匹配，常 `conf=0.0`，不稳） |
@@ -244,6 +250,11 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 12. **中文标点**：新增/修改 Python 源码注释与字符串用 ASCII `,` `;`（仓库 AGENTS.md 要求）。
 13. **日志脱敏**：不提交用户日志、截图、账号、本机隐私路径。
 14. **Z 盘是 ramdisk**：重启清空，仓库必须放 C 盘。
+15. **残虹二连的长按时机（血坑）**：双 Q 之后**绝不能**"动画一结束就长按"。必须**同时**满足：
+    - **第 2 段** Q 的动画结束（`enter2` 已确认，不能拿第 1 段的结束当数）+ `is_in_team()` 稳定 0.3s 回来；
+    - Q 冷却的**原始 OCR 数字**真正变小。
+
+    为什么：`get_cd()` 是"OCR 值 − 自快照以来的时间"，冷却数字只要挂在屏幕上它就一直变小（即使游戏冻结冷却），所以旧 `_wait_cd_ticking()` 实际只等到"数字第二次可见"，HUD 一回来就触发；游戏在 Q 动画期间把冷却数字冻结在满值，原始数字开始变小才是动画真正结束。实测手动间隔 **5.04/5.09/5.25s**（3 次），旧逻辑只有 **3.09s**，早约 2s，那 2.0s 长按全落在动画/收招里，普攻不生效 → `zankou gold E not detected, best conf=0.000` → 二连接不上。**同理：`_switch_to()` 刚确认就长按也是全空**（切人确认后 0.001s 那次）。现在由 `_wait_double_q_recovery()` 把关。
 
 ---
 

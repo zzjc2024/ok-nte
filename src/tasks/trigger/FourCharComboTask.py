@@ -709,9 +709,10 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     def _zankou_double_q(self):
         """残虹双 Q.
 
-        连按 Q, 依次确认四个阶段: 第1段进特写 -> 第1段出特写 -> 第2段进特写 -> 第2段出特写;
-        四个阶段都确认后才开始盯 Q 冷却数字, 一有变化就交回上层做二连。
-        这样能避免"第1段动画刚结束就提前二连"。
+        连按 Q, 依次确认四个阶段: 第1段进特写 -> 第1段出特写 -> 第2段进特写 -> 第2段出特写。
+        之后**不能立刻二连**: 必须等到"第 2 段 Q 动画结束"且"Q 冷却数字真正开始变小"
+        两个条件同时成立 (见 `_wait_double_q_recovery`), 否则长按会落在动画/收招里,
+        普攻不生效, E 不会变金, 二连接不上。
         """
         self._set_action_phase("zankou_double_q")
         zankou = self.zankou
@@ -734,8 +735,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             logger.info("zankou double q done (2 animations)")
         else:
             logger.warning(f"zankou double q incomplete, stage={stage}/4")
-        self._wait_in_team(timeout=self.CONTROLLABLE_TIMEOUT)
-        self._wait_cd_ticking()
+        self._wait_double_q_recovery(stage)
 
     def _press_q_through_animations(self, zankou, deadline):
         """连按 Q 并等待四个阶段确认; 返回已确认的阶段数(0~4).
@@ -960,26 +960,77 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         logger.warning(f"wait controllable timeout {char}")
         return False
 
-    def _wait_cd_ticking(self):
-        """等大招 CD 数字开始变小.
+    def _raw_ultimate_cd(self):
+        """当前角色 Q 冷却的**原始 OCR 数字** (不扣时间); 0 表示没读到数字.
 
-        只在"双 Q 四阶段全部确认之后"调用, 所以一段 Q 与二段 Q 之间那一小跳不会被看到;
-        真正等到的是二段特写结束后 CD 恢复计时的第一次变化。
+        必须用原始值: `get_cd()` 会减去"自 OCR 快照以来的时间", 所以只要冷却数字还挂在
+        屏幕上, 即使游戏里冷却被冻结, `get_cd()` 也会一路变小, 不能用来判断
+        "冷却是否真的开始计时"。
         """
+        char = self.get_current_char(raise_exception=False)
+        if char is None:
+            return 0.0
+        self.refresh_cd()
+        cds = self.cds.get(char.index)
+        return cds["ultimate"] if cds else 0.0
+
+    def _wait_double_q_recovery(self, stage):
+        """等二连可以长按的时机; 两个条件必须同时成立.
+
+        1. **第 2 段** Q 的动画结束: 必须确认过 `enter2` (stage >= 3), 不能拿第 1 段的结束
+           当数; 且 HUD (`is_in_team`) 要稳定回来, 排除特写期间的状态抖动。
+        2. Q 冷却**原始数字**真正变小: 游戏在 Q 动画期间把冷却数字冻结在满值,
+           所以数字开始变小 = 动画结束、冷却开始计时。
+
+        实测依据: 长按比正确时机早约 2s 时, 2.0s 长按全程落在动画/收招里,
+        普攻完全不生效, 金 E 检测 `best conf=0.000`, 二连接不上。
+        """
+        if stage < 3:
+            logger.warning(
+                f"zankou double q recovery: enter2 not confirmed (stage={stage}), "
+                f"still waiting for in_team + cd"
+            )
         start = time.time()
-        previous = None
+        baseline = None
+        in_team_since = None
+        last_log = 0.0
         with self.skip_sleep_checks() as skip:
             skip.check_combat = True
             while time.time() - start < self.CONTROLLABLE_TIMEOUT:
-                remaining = self.get_cd("ultimate")
-                if remaining > 0 and previous is not None and remaining < previous - 0.001:
-                    logger.info(f"zankou q cd ticking {previous:.2f} -> {remaining:.2f}")
+                now = time.time()
+                if self.is_in_team():
+                    if in_team_since is None:
+                        in_team_since = now
+                else:
+                    in_team_since = None
+                raw = self._raw_ultimate_cd()
+                if raw > 0 and baseline is None:
+                    baseline = raw
+                if now - last_log >= 1.0:
+                    last_log = now
+                    logger.info(
+                        f"zankou double q recovery t={now - start:.2f}s "
+                        f"in_team={bool(self.is_in_team())} cd_raw={raw:.1f} "
+                        f"baseline={baseline}"
+                    )
+                in_team_ok = (
+                    in_team_since is not None
+                    and now - in_team_since >= self.ANIMATION_STABLE_TIME
+                )
+                cd_ok = raw > 0 and baseline is not None and raw < baseline - 0.001
+                if in_team_ok and cd_ok:
+                    logger.info(
+                        f"zankou combo ready in {now - start:.2f}s "
+                        f"(stage={stage}, cd_raw {baseline:.1f} -> {raw:.1f})"
+                    )
                     return True
-                if remaining > 0:
-                    previous = remaining
                 self.sleep(self.SCRIPT_TICK)
-        self._dump_q_cd_state("cd_ticking_timeout")
-        logger.warning("wait cd ticking timeout")
+        self._dump_q_cd_state("combo_ready_timeout")
+        logger.warning(
+            f"wait zankou combo ready timeout (stage={stage}, "
+            f"in_team={bool(self.is_in_team())}, "
+            f"cd_raw={self._raw_ultimate_cd():.1f}, baseline={baseline})"
+        )
         return False
 
     def _q_button_lit(self):
