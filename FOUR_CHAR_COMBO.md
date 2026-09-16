@@ -53,7 +53,7 @@
 
 ### 1.3 残虹二连（核心操作）
 
-**长按左键（最低 0.7s）→ 检测到 E 变金色 → 松开 → 等 0.1s → 单击左键 → 等 0.05s → 立即切人。**
+**长按左键（最低 0.7s）→ 检测到 E 变金色 → 松开 → 等 0.06s → 单击左键 → 等 0.05s → 立即切人。**
 - 闪避反击导致 E 变金也走这套。
 - 长按过早/过晚都不行；没检测到金 E 不许切人（当前实现会 warning，但仍会继续，需实测调）。
 
@@ -155,7 +155,7 @@
 
 ```
 COMBO_HOLD_MIN=0.7  COMBO_HOLD_MAX=2.0  COMBO_POLL_INTERVAL=0.05
-COMBO_RELEASE_GAP=0.1  COMBO_CLICK_GAP=0.05
+COMBO_RELEASE_GAP=0.06  COMBO_CLICK_GAP=0.05
 SKILL_REGISTER_TIMEOUT=1.0  DAFFODILL_SKILL_REGISTER_TIMEOUT=0.5
 GOLD_THRESHOLD=0.7  DAFFODILL_FIELD_TIME=1.5  PAD_FIELD_TIME=1.5  IROI_FUNNEL_POST_SLEEP=0.3
 Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTERVAL=0.12
@@ -213,6 +213,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - 所有角色 E 统一为 `_skill_until_registered`（残虹金 E / 伊洛伊 / 早雾 / 达芙蒂尔），做到“观察到 E 进 CD 立即切人”，不再等 `click_skill()` 动画收尾。
 - 达芙蒂尔在场窗口 `DAFFODILL_FIELD_TIME` 由 2.0s 调整为 **1.5s**。
 - 伊洛伊/早雾垫刀（`_pad_until_q`）改为先在 target 身上打 `PAD_FIELD_TIME`(1.5s) 再切残虹二连（原为只点一次左键就切），避免频繁空切、给这两位更多输出时间。
+- 残虹二连 `COMBO_RELEASE_GAP`（长按松开→单击左键）由 0.1s 调整为 **0.06s**（实测手动平均 0.065s）。
 
 **实测已知问题（最近一轮日志结论）**：
 - `is_in_team` 动画判断失效 → 已修（移除）。

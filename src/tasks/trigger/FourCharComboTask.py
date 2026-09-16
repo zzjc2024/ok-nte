@@ -31,7 +31,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     COMBO_HOLD_MIN = 0.7
     COMBO_HOLD_MAX = 2.0
     COMBO_POLL_INTERVAL = 0.05
-    COMBO_RELEASE_GAP = 0.1
+    COMBO_RELEASE_GAP = 0.06
     COMBO_CLICK_GAP = 0.05
     GOLD_THRESHOLD = 0.7
     DAFFODILL_FIELD_TIME = 1.5
