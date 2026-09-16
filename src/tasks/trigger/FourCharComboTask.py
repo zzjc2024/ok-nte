@@ -86,8 +86,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     ENTRY_SKILL_WAIT = 1.6
     SUPPRESS_SWITCH_CLICK = True
     CYCLE_BAR_VISIBLE_MIN_PIXELS = 20
-    IROI_FUNNEL_CUTSCENE_START_TIMEOUT = 1.0
-    IROI_FUNNEL_ANIMATION_TIMEOUT = 4.0
+    IROI_FUNNEL_ANIMATION_TIMEOUT = 5.0
     SKILL_REGISTER_TIMEOUT = 2.0
     DAFFODILL_SKILL_REGISTER_TIMEOUT = 0.5
     CONTROLLABLE_TIMEOUT = 10.0
@@ -543,23 +542,39 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         )
         if not self._press_q_ready(zankou):
             return
-        self._press_q_until_registered(zankou, self._q_button_lit(), self.Q_REGISTER_TIMEOUT)
-        logger.info(
-            f"zankou first q done lit={self._q_button_lit()} "
-            f"cd={self.get_cd('ultimate'):.2f}"
-        )
-        if not self.wait_until(
-            zankou.ultimate_available, time_out=self.Q_DOUBLE_TIMEOUT, raise_if_not_found=False
-        ):
-            logger.warning("zankou second Q not ready after first")
-            return
-        second_lit = self._q_button_lit()
-        self._press_q_until_registered(zankou, second_lit, self.Q_REGISTER_TIMEOUT)
-        logger.info(
-            f"zankou second q done lit={self._q_button_lit()} "
-            f"cd={self.get_cd('ultimate'):.2f}"
-        )
-        self._wait_controllable(zankou, second_lit)
+        self._wait_in_team(timeout=self.ENTRY_SKILL_WAIT)
+        animations = 0
+        in_animation = False
+        last_press = 0.0
+        deadline = time.time() + self.Q_DOUBLE_TIMEOUT
+        with self.skip_sleep_checks() as skip:
+            skip.check_combat = True
+            while animations < 2 and time.time() < deadline:
+                now = time.time()
+                if now - last_press >= self.Q_PRESS_INTERVAL:
+                    zankou.send_ultimate_key(
+                        action_name="four_combo_q", interval=0.1, down_time=0.05
+                    )
+                    last_press = now
+                if not self.is_in_team():
+                    if not in_animation:
+                        in_animation = True
+                        animations += 1
+                        logger.info(f"zankou q animation {animations} entered")
+                else:
+                    in_animation = False
+                self.sleep(self.SCRIPT_TICK)
+        if animations >= 2:
+            logger.info("zankou double q done (2 animations)")
+        else:
+            logger.warning(f"zankou double q incomplete, animations={animations}")
+        self._wait_in_team(timeout=self.CONTROLLABLE_TIMEOUT)
+
+    def _wait_in_team(self, timeout=2.0):
+        """等脱离大招动画(is_in_team 恢复)."""
+        start = time.time()
+        while not self.is_in_team() and time.time() - start < timeout:
+            self.sleep(0.05)
 
     def _zankou_q_remaining(self):
         if self.has_cd("ultimate"):
@@ -660,12 +675,13 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         return self._cycle_bar_white_pixels() >= self.CYCLE_BAR_VISIBLE_MIN_PIXELS
 
     def _wait_iroi_cutscene(self):
-        """等伊洛伊 Q 特写: 先等环合条消失(特写开始), 再等环合条恢复(特写结束)."""
+        """等伊洛伊 Q 大招动画结束 (is_in_team 恢复); 环合条像素仅作对照采样."""
         start = time.time()
         last_log = -1.0
-
-        def log_sample():
-            nonlocal last_log
+        while (
+            not self.is_in_team()
+            and time.time() - start < self.IROI_FUNNEL_ANIMATION_TIMEOUT
+        ):
             elapsed = time.time() - start
             if elapsed - last_log >= 0.2:
                 last_log = elapsed
@@ -673,21 +689,12 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                     f"iroi cutscene t={elapsed:.2f}s "
                     f"cycle_bar_pixels={self._cycle_bar_white_pixels()}"
                 )
-
-        while (
-            self._is_cycle_bar_visible()
-            and time.time() - start < self.IROI_FUNNEL_CUTSCENE_START_TIMEOUT
-        ):
-            log_sample()
             self.sleep(0.05)
-        while (
-            not self._is_cycle_bar_visible()
-            and time.time() - start < self.IROI_FUNNEL_ANIMATION_TIMEOUT
-        ):
-            log_sample()
-            self.sleep(0.05)
-        log_sample()
-        logger.info(f"iroi cutscene wait done {time.time() - start:.2f}s")
+        logger.info(
+            f"iroi cutscene wait done {time.time() - start:.2f}s "
+            f"in_team={bool(self.is_in_team())} "
+            f"cycle_bar_pixels={self._cycle_bar_white_pixels()}"
+        )
 
     def _wait_controllable(self, char, was_lit):
         """可控信号: 冷却数字开始跳 或 Q 按钮由亮变灭."""

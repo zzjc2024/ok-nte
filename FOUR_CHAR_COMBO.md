@@ -59,10 +59,11 @@
 
 ### 1.4 残虹双 Q
 
-1. 第一段 Q（连按到注册）；
-2. `wait_until(ultimate_available)` **等 Q 重新亮起**（真实表现：第一段动画结束后 Q 是灭的，**可控之后 Q 会亮起**）；
-3. 第二段 Q（连按到注册）；
-4. `_wait_controllable`。
+1. 切残虹后先等脱离切人/入场动画（`_wait_in_team`，避免把切人动画误计）；
+2. **一直连按 Q**（`send_ultimate_key` 每 ~0.12s，冷却中按键被游戏忽略）；
+3. 用**大招动画次数**确认两段：`is_in_team()` 由 True→False 记一次动画，数到 **2 次** 才停（第一段特写、第二段特写）；
+4. 再 `_wait_in_team` 等第二段动画结束。
+- 依据：`BaseChar._wait_action_animation` 就是用 `is_in_team` 判断大招动画进入/脱离；日志证实特写期间 `is_in_team` 连续 False ~2s。
 
 ### 1.5 浮游炮（伊洛伊）
 
@@ -162,8 +163,7 @@ SKILL_REGISTER_TIMEOUT=2.0  DAFFODILL_SKILL_REGISTER_TIMEOUT=0.5
 GOLD_THRESHOLD=0.7  DAFFODILL_FIELD_TIME=1.5  PAD_FIELD_TIME=1.5  IROI_FUNNEL_POST_SLEEP=0.3
 Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTERVAL=0.12
 ENTRY_SKILL_WAIT=1.6  SUPPRESS_SWITCH_CLICK=True  CYCLE_BAR_VISIBLE_MIN_PIXELS=20
-IROI_FUNNEL_CUTSCENE_START_TIMEOUT=1.0  IROI_FUNNEL_ANIMATION_TIMEOUT=4.0
-CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
+IROI_FUNNEL_ANIMATION_TIMEOUT=5.0  CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
 SOUND_REACTION_DAFFODILL_TIME=1.0  SOUND_IMMEDIATE_SPAM_TIME=1.2  SCRIPT_TICK=0.05
 ACTION_LOG_PATH=logs/four_combo_actions.log
 ```
@@ -179,7 +179,8 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 | 队友 Q 是否就绪 | `char.ultimate_available()`（非当前走 `task.ultimate_available(index)` 模板） | 模板匹配经常 `conf=0.0`，不稳 |
 | 残虹金 E | `find_one(Labels.zankou_skill_gold)` | 无专用滤镜，原图颜色模板匹配，阈值 0.7 常漏检；已加 `conf=` 日志 |
 | 残虹环合满 | `is_cycle_full()`（2560x1440 下 `944,1316` 环形白像素密度） | 读的是**当前角色**；必须在切人**之前**读上一任 |
-| 特写是否结束 | 环合条环形白像素 `_cycle_bar_white_pixels()`（同款 `944,1316` 环形区域） | 特写期间环合条**不可见**（≈0），结束后恢复可见；用于伊洛伊浮游炮等特写结束判定 |
+| 大招动画进入/脱离 | `is_in_team()`（特写期间 False） | `BaseChar._wait_action_animation` 即用此判断；可数大招动画次数（残虹双 Q 用） |
+| 特写是否结束（备用） | 环合条环形白像素 `_cycle_bar_white_pixels()`（同款 `944,1316` 环形区域） | 仅作对照采样，当前主判定用 `is_in_team` |
 | 入场技 | 切人前读上一任 `is_cycle_full()`，满则设 1.6s 入场窗口 | 入场技期间按 Q 无效 → 连按 Q |
 | 关卡剩余时间 | 无通用检测 | 读不到（`heist_timer` 只判断是否在劫案中） |
 | 战斗 UI 是否可见 | `is_in_team()`（`health_bar_slash`） | **NTE 大招特写期间一直 True**，不能判断动画 |
@@ -229,7 +230,8 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - 浮游炮 `_iroi_q_funnel` 长按/等待对齐原版出招表（复用 `iroi._wait_ultimate_unfreeze`，等 `box_ultimate` 图标变化），并补上原版的"等特写结束"（`is_in_team`，`IROI_FUNNEL_ANIMATION_TIMEOUT=4.0`）；结尾保留本脚本的 `sleep 0.3s + 单击左键`。
 - `_zankou_fixed_step` 增加 Q 状态诊断日志（`q_available` / `q_cd` / `lit` / `current`），用于排查主循环双 Q 未触发。
 - **移除切人二次验证**：`_verify_current_char` 轮询+重试在实测中反复误报（达芙蒂尔站场被拖长 ~3s/次），已回退到单次 `_switch_to_char`。
-- 浮游炮特写判定改用**环合条可见性**（`_wait_iroi_cutscene` / `_cycle_bar_white_pixels`）：先等环合条消失（特写开始）再等恢复（特写结束）才长按。
+- 浮游炮特写判定改用 `is_in_team`（`_wait_iroi_cutscene`），环合条像素保留作对照采样。
+- **残虹双 Q 改为"连按 Q + 数大招动画次数"**：`is_in_team` True→False 记一次，数到 2 次停止（用户方案）。
 
 **实测已知问题（最近一轮日志结论）**：
 - `is_in_team` 动画判断失效 → 已修（移除）。
