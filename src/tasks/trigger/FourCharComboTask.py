@@ -104,16 +104,13 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     HEALTH_DROP_MIN_PIXELS = 4
     DODGE_RETRY_TIMEOUT = 3.0
     DODGE_RETRY_INTERVAL = 0.15
-    # 金 E 图标有亮度动画: 实测金状态 gold 模板分数在 0.45~0.86 来回跳, 白/紫状态时 <= 0.29。
-    # 0.7 会漏掉暗相位(晚 0.1~0.3s 才认出金 E), 0.45 更稳也更快。
-    GOLD_THRESHOLD = 0.45
-    # 判"金 E 已经没了"(蓄力攻击吃掉了第一次金 E)用更低的值, 免得被金 E 的暗相位骗到
-    GOLD_LOST_THRESHOLD = 0.35
-    # 闪避反击后的长按: 实测(2026-09-16, 7 次)E 模板在蓄力期间**一直是金**(0.52~0.79),
-    # 看不到"变白再变金", 所以以时间为主: 从开始长按到松手点按 = 1.10~1.57s, 中位 1.34s。
-    DODGE_COMBO_HOLD = 1.35
-    # 万一某次真看到金 E 掉下去(gold < GOLD_LOST_THRESHOLD)并持续这么久, 就当蓄力,
-    # 等它再变金就提前收手(0.2s 是为了排除闪避命中的瞬时闪白, 实测只有 0.05s)
+    # 金 E(真金) vs 白/蓄力: 录屏逐帧证据(logs/证据.mp4) —— 金 0.71~0.88, 白/蓄力 0.42~0.61,
+    # 紫 <=0.41, 无图标 <=0.29。0.65 能干净区分"金"和"白"; 0.45 会把白/蓄力也算成金(已踩过)。
+    GOLD_THRESHOLD = 0.65
+    # 闪避反击后的长按: 等"第二次金 E"(金 -> 白/蓄力 -> 金)。录屏实测: 第一次金 ~0.5s,
+    # 白/蓄力 ~0.6s, 之后第二次金; 手动松手在 1.10~1.57s。上限只作兜底, 到点照常收手(不算异常)。
+    DODGE_COMBO_HOLD = 1.5
+    # 白/蓄力要持续这么久才算"第一次金 E 真的没了"(排除闪避命中的瞬时闪白, 实测只有 0.05s)
     SECOND_GOLD_CHARGE_MIN = 0.2
     DAFFODILL_FIELD_TIME = 1.5
     PAD_FIELD_TIME = 1.5
@@ -889,14 +886,15 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                                 f"second gold: first gold E seen (dodge attack), conf={conf:.3f}"
                             )
                         elif phase == 1:
-                            if conf < self.GOLD_LOST_THRESHOLD:
+                            if conf < self.GOLD_THRESHOLD:
                                 if lost_since == 0.0:
                                     lost_since = time.time()
                                 elif time.time() - lost_since >= self.SECOND_GOLD_CHARGE_MIN:
                                     phase = 2
                                     logger.info(
                                         f"second gold: gold E gone for "
-                                        f"{time.time() - lost_since:.2f}s (charge), conf={conf:.3f}"
+                                        f"{time.time() - lost_since:.2f}s "
+                                        f"(charge/white), conf={conf:.3f}"
                                     )
                             else:
                                 lost_since = 0.0

@@ -48,8 +48,11 @@ DEFAULT_GAME_EXE = "HTGame.exe"
 #            (紫色 E 太弱, 实际不用, 只用来避免把紫色误报成白色)
 SKILL_COCO_JSON = os.path.join(BASE_DIR, "assets", "coco_annotations.json")
 SKILL_FEATURES = ("zankou_skill_gold", "zankou_skill_purple")
-# Mirrors the app template_matching default_threshold / FourCharComboTask.GOLD_THRESHOLD.
-SKILL_THRESHOLD = 0.7
+# 阈值来自录屏逐帧证据(logs/证据.mp4, 1920x1080 窗口):
+#   金 0.71~0.88 | 白/蓄力 0.42~0.61 | 紫 0.0~0.41 | 无图标 <=0.29
+# 所以金要 >= 0.65 才算(与 app 的 GOLD_THRESHOLD 一致); 用 0.45 会把"白/蓄力"误判成金。
+SKILL_THRESHOLD = 0.65
+SKILL_PURPLE_THRESHOLD = 0.35
 SKILL_POLL_INTERVAL = 0.05
 SKILL_HEARTBEAT_INTERVAL = 5.0
 # 日志里用的短状态名, 便于阅读(原始模板名会一起打出来)
@@ -59,13 +62,6 @@ SKILL_STATE_LABELS = {
 }
 SKILL_STATE_WHITE = "white"
 SKILL_STATE_NONE = "none"
-# 状态判定(用实测数据校准, 见 logs/skill_state.log):
-#   金 E 时 gold 分数在 0.45~0.86 之间来回跳(图标有呼吸/亮度动画), purple 最高 0.40;
-#   紫 E 时 purple 0.66~0.84, gold 最高 0.18;
-#   白 E / 无图标时两个模板都 <= 0.29。
-# 所以不能像 app 那样用 0.7 绝对阈值(会把金 E 的暗相位误报成白), 改成"谁高算谁 + 下限 + 迟滞"。
-SKILL_STATE_MIN_CONF = 0.35
-SKILL_STATE_SWITCH_MARGIN = 0.05
 # 模板框内近白像素占比: 有图标(白/金/紫)时 >= 0.11, 没图标时 <= 0.07, 取中间值。
 SKILL_WHITE_PIXEL_MIN = 200
 SKILL_WHITE_RATIO_MIN = 0.09
@@ -300,13 +296,12 @@ class SkillMonitor:
     `find_one(Labels.zankou_skill_gold)` 同一套模板、同一阈值, 所以这里的分数可以直接
     和流程日志里的 conf 对比。
 
-    E 有三个状态: white(初始) -> gold(条件触发) -> purple(金 E 放完且残虹没离场, 实际不用)。
-    每次轮询截游戏窗口客户区 -> 在模板标注框附近匹配两个模板:
-      - 两个模板里分数更高的那个, 且 >= SKILL_STATE_MIN_CONF -> 就是那个状态
-        (金 E 图标有亮度动画, 绝对阈值 0.7 会把暗相位误报成白, 所以用相对比较);
-      - 当前状态还站得住(分数 >= 下限 且 不低于挑战者 - SKILL_STATE_SWITCH_MARGIN)就不切;
-      - 两个都不够 -> white(初始状态, 没有对应模板) / none(框内几乎没有亮像素, 残虹不在场)。
-    同时记录模板框内近白像素占比(white_ratio)作为判据和诊断。
+    E 状态(阈值来自录屏逐帧证据, 见 SKILL_THRESHOLD 注释):
+      - gold  : gold 模板 >= SKILL_THRESHOLD(0.65)          (真金 E, 0.71~0.88)
+      - purple: purple 模板 >= 0.35 且比 gold 高              (紫 E, 0.38~0.84)
+      - white : 都不是, 但框内有图标(white_ratio >= 0.09)     (初始白 / 蓄力白, 0.12~0.61)
+      - none  : 框内几乎没有亮像素                             (残虹不在场)
+    闪避攻击后的蓄力阶段就是 white(gold 模板 0.42~0.61), 所以"金 -> 白 -> 金"能直接看出来。
     """
 
     def __init__(
@@ -335,7 +330,6 @@ class SkillMonitor:
         self._thread = None
         self._feature_set = None
         self._capture = GameCapture()
-        self._state_feature = None
         self._log = None
         self._last_frame = None
 
@@ -524,24 +518,16 @@ class SkillMonitor:
             scores[name] = max((box.confidence for box in boxes), default=0.0)
         self.scores = scores
         self.white_ratio = self._white_ratio(frame)
-        best = max(scores, key=scores.get) if scores else None
-        best_score = scores.get(best, 0.0) if best is not None else 0.0
-        if self._state_feature is not None and self._state_feature in scores:
-            current_score = scores[self._state_feature]
-            if (
-                current_score >= SKILL_STATE_MIN_CONF
-                and current_score >= best_score - SKILL_STATE_SWITCH_MARGIN
-            ):
-                best, best_score = self._state_feature, current_score
-        if best is not None and best_score >= SKILL_STATE_MIN_CONF:
-            state = SKILL_STATE_LABELS.get(best, best)
-            self._state_feature = best
+        gold = scores.get(self.features[0], 0.0)
+        purple = scores.get(self.features[1], 0.0)
+        if gold >= SKILL_THRESHOLD:
+            state = SKILL_STATE_LABELS.get(self.features[0], self.features[0])
+        elif purple >= SKILL_PURPLE_THRESHOLD and purple > gold:
+            state = SKILL_STATE_LABELS.get(self.features[1], self.features[1])
         elif self.white_ratio >= SKILL_WHITE_RATIO_MIN:
             state = SKILL_STATE_WHITE
-            self._state_feature = None
         else:
             state = SKILL_STATE_NONE
-            self._state_feature = None
         return state, scores
 
     def _white_ratio(self, frame):

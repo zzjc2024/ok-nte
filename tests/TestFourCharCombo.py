@@ -99,7 +99,7 @@ class TestFourCharCombo(unittest.TestCase):
             if elapsed < 0.05:
                 return Mock(confidence=0.85)  # 第一次金 E(闪避攻击)
             if elapsed < 0.35:
-                return Mock(confidence=0.10)  # 蓄力: 金 E 消失
+                return Mock(confidence=0.10)  # 蓄力/白: 金 E 消失
             return Mock(confidence=0.80)  # 第二次金 E
 
         self.task.DODGE_COMBO_HOLD = 1.0
@@ -111,8 +111,29 @@ class TestFourCharCombo(unittest.TestCase):
         self.assertFalse(damaged)
         self.assertLess(time.time() - start, 1.0)  # 提前收手, 没等到上限
 
+    def test_charge_white_score_is_not_treated_as_gold(self):
+        # 录屏实测: 蓄力/白阶段 gold 模板 0.42~0.61, 真金 0.71~0.88
+        # 0.55 必须算"金 E 没了", 否则又回到"全程 gold"的老bug
+        start = time.time()
+
+        def find_one(*args, **kwargs):
+            elapsed = time.time() - start
+            if elapsed < 0.05:
+                return Mock(confidence=0.85)  # 第一次金 E
+            if elapsed < 0.35:
+                return Mock(confidence=0.55)  # 蓄力/白
+            return Mock(confidence=0.80)  # 第二次金 E
+
+        self.task.DODGE_COMBO_HOLD = 1.0
+        self.task.find_one = Mock(side_effect=find_one)
+
+        result, _damaged = self.task._hold_until_gold(require_second_gold=True)
+
+        self.assertIs(result, HoldResult.GOLD)
+        self.assertLess(time.time() - start, 1.0)
+
     def test_dodge_hold_proceeds_at_deadline_when_charge_never_seen(self):
-        # 实测: 蓄力期间 E 模板一直是金(看不到变白), 到点必须照常收手点按, 不能抛异常
+        # 万一没看到蓄力(比如被特效糊住), 到点也必须照常收手点按, 不能抛异常
         self.task.DODGE_COMBO_HOLD = 0.3
         self.task.find_one = self._conf_sequence([0.85, 0.85, 0.85, 0.85])
 
