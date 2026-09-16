@@ -104,7 +104,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     HEALTH_DROP_MIN_PIXELS = 4
     DODGE_RETRY_TIMEOUT = 3.0
     DODGE_RETRY_INTERVAL = 0.15
-    GOLD_THRESHOLD = 0.7
+    # 金 E 图标有亮度动画: 实测金状态 gold 模板分数在 0.45~0.86 来回跳, 白/紫状态时 <= 0.29。
+    # 0.7 会漏掉暗相位(晚 0.1~0.3s 才认出金 E), 0.45 更稳也更快。
+    GOLD_THRESHOLD = 0.45
     DAFFODILL_FIELD_TIME = 1.5
     PAD_FIELD_TIME = 1.5
     IROI_FUNNEL_POST_SLEEP = 0.3
