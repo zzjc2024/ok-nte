@@ -219,6 +219,9 @@ White → Green → Red → Purple → Blue → Yellow → White
 - 双 Q 的 `exit2` 基本确认不了（超时 8s < 全程 ~11s），二连时机不依赖它。
 - 早雾 E 经常放不出来（日志 `Sakiri skill not registered within 2.0s`，`lit=0` / `in_team=False`）。根因是她刚放完 Q 还在大招特写里（`in_team=False`），而按键在特写期间不生效。**已修**：`_wait_controllable` 改成等 Q 冷却**原始数字**开始变小（"图标由亮变灭"只作没有冷却数字时的兜底 —— 实测大招一按下去图标就变灭，但人还在特写里），`_skill_until_registered` 也先 `_wait_in_team` 再按 E，特写期间不浪费按键。
 - 切人确认**两个方向都会错**：漏判（`four combo switch not confirmed, want X, got -1`）和误判（21:01 早雾→残虹 误报 confirmed，见 §5.1）。误判已由 `_verify_current` + 二连前的复查兜住；漏判仍靠重按 3s 兜。
+- **主循环二连会和"闪避成功反击二连"撞车（21:14 异常的直接原因，待定方案）**：完美闪避发生时主循环往往已经切到残虹、正准备打二连，此时声音路径先接管打了一套反击二连（用掉了 E），主循环醒来又打一套 → 二次长按只能看到"上一次残留的金 E"，而它落在 `COMBO_HOLD_MIN=0.67s` 之前被有意忽略 → 报 `NO_GOLD`；这 0.9s 里角色站着挨打 → `damaged=True` → 走闪避重试 → 见下一条 → 抛异常停任务。21:13 同一模式也发生过，但残留金 E 撑过了 0.67s 就被当成金 E 点掉了（等于白点一次），所以这是个**靠时序的抽奖**，不是稳定复现。
+- **"闪避动作音"在游戏里从未触发过（实测，待定方案）**：两个会话 0 次 `Dodge MOTION TRIGGERED`（监听日志里分数只有 0.04~0.12，阈值 0.25/0.3），但同期有 3 次**确凿的真实闪避**（伴随 `Dodge SUCCESS TRIGGERED` 0.44~0.65）。所以 `_dodge_until_triggered()`（连按 shift 等闪避动作音）**必然 3s 超时 → 抛异常**，`_hold_until_gold` 的 `HoldResult.DODGE` 也只能靠成功音触发。需要一段"战斗中的普通闪避"录音才能判断是模板不匹配、还是普通闪避根本不播这个音。
+- 另：`_dodge_until_triggered` 用 `skip_sleep_checks(skip.all=True)` 自己连按 shift，期间声音路径的待执行闪避被丢弃（实测日志 `Sound action discarded after timeout: dodge`），而声音路径的闪避是"方向键+shift"序列、比裸 shift 更容易出完美闪避 → 两套闪避在抢。
 
 ---
 
