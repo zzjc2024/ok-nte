@@ -37,9 +37,9 @@
 - **伊洛伊**：
   - 切到伊洛伊后先点 **E**（获取增伤，观察到 E 进 CD 即继续）；
   - Q 可放 → 直接放 Q → 触发浮游炮（Q 顺带回血）；
-  - Q 不可放 → 点按 1 次左键 → 切残虹二连 → 切回伊洛伊，重复直到 Q 可放 → 放 Q → 触发浮游炮。
+  - Q 不可放 → 在伊洛伊身上打 **PAD_FIELD_TIME(1.5s)** → 切残虹二连 → 切回伊洛伊，重复直到 Q 可放 → 放 Q → 触发浮游炮。
 - **早雾**：
-  - Q 可放 → 点 Q；不可放 → 同样垫刀（点 1 次左键 → 残虹二连 → 切回早雾），直到 Q 可放 → 点 Q；
+  - Q 可放 → 点 Q；不可放 → 同样垫刀（在早雾身上打 1.5s → 残虹二连 → 切回早雾），直到 Q 可放 → 点 Q；
   - 点 **E**，**观察到 E 进 CD 立即切残虹**（不等动画收尾）。
 - **残虹固定步骤**（双 Q **只在这里放**，读 `get_cd("ultimate")`）：
   - Q 亮 → 双 Q → 二连；
@@ -141,7 +141,7 @@
 | `_zankou_fixed_step` | 早雾之后的残虹固定步骤（双 Q 只在这里） |
 | `_daffodill_until_cycle_full` / `_daffodill_window` | 达芙蒂尔循环；窗口内 E 用 `_skill_until_registered`，保证 `DAFFODILL_FIELD_TIME` 计时有效 |
 | `_skill_until_registered` | 连按 E 直到 E 进 CD（已释放）即返回；替代阻塞的 `click_skill()`，实现“观察到 CD 就切人” |
-| `_pad_until_q` | 伊洛伊/早雾 Q 不可放时的垫刀循环 |
+| `_pad_until_q` | 伊洛伊/早雾 Q 不可放时的垫刀循环：在 target 身上打 `PAD_FIELD_TIME`(1.5s) → 残虹二连 → 切回 |
 | `_zankou_gold_e` / `_zankou_combo` | 开局金 E / 残虹二连 |
 | `_hold_until_gold` | 长按轮询金 E（最低 0.7s，最长 2s，记录 conf） |
 | `_zankou_double_q` | 双 Q（等 Q 重新亮起） |
@@ -157,7 +157,7 @@
 COMBO_HOLD_MIN=0.7  COMBO_HOLD_MAX=2.0  COMBO_POLL_INTERVAL=0.05
 COMBO_RELEASE_GAP=0.1  COMBO_CLICK_GAP=0.05
 SKILL_REGISTER_TIMEOUT=1.0  DAFFODILL_SKILL_REGISTER_TIMEOUT=0.5
-GOLD_THRESHOLD=0.7  DAFFODILL_FIELD_TIME=1.5  IROI_FUNNEL_POST_SLEEP=0.3
+GOLD_THRESHOLD=0.7  DAFFODILL_FIELD_TIME=1.5  PAD_FIELD_TIME=1.5  IROI_FUNNEL_POST_SLEEP=0.3
 Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTERVAL=0.12
 ENTRY_SKILL_WAIT=1.6  CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
 SOUND_REACTION_DAFFODILL_TIME=1.0  SOUND_IMMEDIATE_SPAM_TIME=1.2  SCRIPT_TICK=0.05
@@ -212,6 +212,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - 主循环伊洛伊补齐 **E**（原只在开局放，缺增伤）：切伊洛伊 → E → Q → 浮游炮。
 - 所有角色 E 统一为 `_skill_until_registered`（残虹金 E / 伊洛伊 / 早雾 / 达芙蒂尔），做到“观察到 E 进 CD 立即切人”，不再等 `click_skill()` 动画收尾。
 - 达芙蒂尔在场窗口 `DAFFODILL_FIELD_TIME` 由 2.0s 调整为 **1.5s**。
+- 伊洛伊/早雾垫刀（`_pad_until_q`）改为先在 target 身上打 `PAD_FIELD_TIME`(1.5s) 再切残虹二连（原为只点一次左键就切），避免频繁空切、给这两位更多输出时间。
 
 **实测已知问题（最近一轮日志结论）**：
 - `is_in_team` 动画判断失效 → 已修（移除）。

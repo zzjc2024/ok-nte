@@ -35,6 +35,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     COMBO_CLICK_GAP = 0.05
     GOLD_THRESHOLD = 0.7
     DAFFODILL_FIELD_TIME = 1.5
+    PAD_FIELD_TIME = 1.5
     IROI_FUNNEL_POST_SLEEP = 0.3
     Q_READY_TIMEOUT = 5.0
     Q_REGISTER_TIMEOUT = 3.0
@@ -398,14 +399,23 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     # ------------------------------------------------------------ pad loops
 
     def _pad_until_q(self, target):
-        """点一次左键 -> 切残虹二连 -> 切回, 直到 target Q 可放."""
+        """在 target 身上打 PAD_FIELD_TIME 秒 -> 切残虹二连 -> 切回, 直到 target Q 可放."""
         self._set_action_phase("pad_until_q")
         while self.in_combat() and not target.ultimate_available():
-            self._maybe_handle_sound_counter()
-            self.click()
+            start = time.time()
+            while (
+                self.in_combat()
+                and not target.ultimate_available()
+                and time.time() - start < self.PAD_FIELD_TIME
+            ):
+                self._maybe_handle_sound_counter()
+                self.click()
+                self.sleep(0.1)
+            if not self.in_combat() or target.ultimate_available():
+                break
             if self._zankou_combo_switch(target) is not target:
                 return False
-        return True
+        return self.in_combat() and target.ultimate_available()
 
     # ------------------------------------------------------------- zankou
 
