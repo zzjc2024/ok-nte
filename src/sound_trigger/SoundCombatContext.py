@@ -266,7 +266,25 @@ class SoundCombatContext:
         ).start()
 
     def _on_dodge_triggered(self):
+        self._notify_task_alert()
         self._queue_action("dodge")
+
+    def _notify_task_alert(self):
+        """Notify the bound task that an attack cue was heard.
+
+        Runs on the listener thread, so the task handler must be non-blocking.
+        Tasks use it to interrupt their own long sequences (e.g. the combo that
+        follows a dodge-success cue) instead of waiting for the action queue.
+        """
+        trigger = self._trigger
+        task = trigger.task if trigger else None
+        handler = getattr(task, "on_sound_alert", None)
+        if handler is None:
+            return
+        try:
+            handler()
+        except Exception as e:
+            logger.error("Sound alert handler error", e)
 
     def _on_counter_triggered(self):
         self._queue_action("dodge" if self._dodge_all_attacks else "counter")

@@ -112,6 +112,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._sound_counter_pending = False
         self._in_sound_reaction = False
         self._pad_target = None
+        self._alert_interrupt = threading.Event()
         self._action_phase = ""
         self._action_log_handle = None
         self._action_log_last = 0.0
@@ -190,6 +191,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._sound_counter_pending = False
         self._action_phase = ""
         self._suppress_combat_check = False
+        self._alert_interrupt.clear()
 
     def check_combat(self):
         """紧输入序列(开局)期间抑制战斗检测, 避免大招特写被误判脱战打断."""
@@ -507,12 +509,22 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._skill_until_registered(self.zankou)
 
     def _zankou_combo(self):
-        """残虹二连: 长按轮询金E -> 松开 -> 等 0.1s -> 单击左键 -> 等 0.05s."""
+        """残虹二连: 长按轮询金E -> 松开 -> 单击左键 (间隔见 COMBO_* 常量)."""
         self._set_action_phase("zankou_combo")
         self._hold_until_gold()
         self.sleep(self.COMBO_RELEASE_GAP)
         self.click()
         self.sleep(self.COMBO_CLICK_GAP)
+
+    def _zankou_combo_interruptible(self):
+        """残虹二连(长按期间可被新攻击警报打断); 返回 True 表示被打断."""
+        self._set_action_phase("zankou_combo")
+        if self._hold_until_gold(interrupt_event=self._alert_interrupt):
+            return True
+        self.sleep(self.COMBO_RELEASE_GAP)
+        self.click()
+        self.sleep(self.COMBO_CLICK_GAP)
+        return False
 
     def _zankou_combo_switch(self, default_target):
         self._set_action_phase("zankou_enter")
@@ -524,7 +536,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._switch_to(default_target)
         return default_target
 
-    def _hold_until_gold(self):
+    def _hold_until_gold(self, interrupt_event=None):
+        """长按轮询金 E; 返回 True 表示被 interrupt_event 打断."""
+        interrupted = False
         wait = self._entry_skill_until - time.time()
         if wait > 0:
             logger.info(f"zankou wait entry skill {wait:.2f}s before combo")
@@ -540,6 +554,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 min_until = start + self.COMBO_HOLD_MIN
                 max_until = start + self.COMBO_HOLD_MAX
                 while time.time() < max_until:
+                    if interrupt_event is not None and interrupt_event.is_set():
+                        interrupted = True
+                        break
                     box = self.find_one(Labels.zankou_skill_gold, threshold=0.0)
                     conf = box.confidence if box else 0.0
                     if conf > best_conf:
@@ -550,10 +567,13 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                     self.sleep(self.COMBO_POLL_INTERVAL)
         finally:
             self.mouse_up()
-        if gold:
+        if interrupted:
+            logger.info("zankou combo hold interrupted by new attack alert")
+        elif gold:
             logger.info(f"zankou gold E detected, conf={best_conf:.3f}")
         else:
             logger.warning(f"zankou gold E not detected, best conf={best_conf:.3f}")
+        return interrupted
 
     def _zankou_double_q(self):
         self._set_action_phase("zankou_double_q")
@@ -779,7 +799,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     def _sound_dodge_success_action(self):
         """听到"闪避成功音"后的反击.
 
-        残虹: 点按左键 -> 等 SOUND_SUCCESS_WAIT -> 残虹二连(长按+短按).
+        残虹: 点按左键 -> 等 SOUND_SUCCESS_WAIT -> 残虹二连.
+              二连长按期间若又听到攻击警报, 立即打断: 闪避 -> 点按左键 -> 再等 -> 再打二连。
         其他角色: 保持原逻辑(连点左键+连点切人键), 随后主循环切残虹打二连。
         """
         current = self.get_current_char(raise_exception=False)
@@ -789,9 +810,19 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 self._sound_immediate_reaction()
                 return
             self._set_action_phase("sound_success")
-            self.click(down_time=self.SOUND_SUCCESS_CLICK_DOWN)
-            time.sleep(self.SOUND_SUCCESS_WAIT)
-            self._zankou_combo()
+            while True:
+                self._alert_interrupt.clear()
+                self.click(down_time=self.SOUND_SUCCESS_CLICK_DOWN)
+                time.sleep(self.SOUND_SUCCESS_WAIT)
+                if not self._zankou_combo_interruptible():
+                    return
+                logger.info("sound success combo interrupted, dodge then retry")
+                self._set_action_phase("sound_success_interrupt")
+                self._sound_dodge_action()
+
+    def on_sound_alert(self):
+        """攻击警报回调(在声音监听线程上): 只置标志, 供连招中途被打断."""
+        self._alert_interrupt.set()
 
     def _sound_immediate_reaction(self):
         """触发闪避反击后第一时间连点左键并连点切人键."""
