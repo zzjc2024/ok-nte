@@ -82,9 +82,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     Q_DOUBLE_TIMEOUT = 8.0
     Q_PRESS_INTERVAL = 0.12
     ENTRY_SKILL_WAIT = 1.6
-    SWITCH_VERIFY_ATTEMPTS = 3
-    SWITCH_VERIFY_TIMEOUT = 1.0
     SUPPRESS_SWITCH_CLICK = True
+    IROI_FUNNEL_ANIMATION_TIMEOUT = 4.0
     SKILL_REGISTER_TIMEOUT = 2.0
     DAFFODILL_SKILL_REGISTER_TIMEOUT = 0.5
     CONTROLLABLE_TIMEOUT = 10.0
@@ -617,8 +616,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             return
         was_lit = self._q_button_lit()
         self._press_q_until_registered(iroi, was_lit, self.Q_REGISTER_TIMEOUT)
+        start = time.time()
+        while not self.is_in_team() and time.time() - start < self.IROI_FUNNEL_ANIMATION_TIMEOUT:
+            self.sleep(0.05)
         try:
-            iroi._wait_ultimate_unfreeze(time.time())
+            iroi._wait_ultimate_unfreeze(start)
         finally:
             if iroi._mouse_pressed:
                 self.mouse_up()
@@ -744,35 +746,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         if current is char:
             return
         entry_skill = current is not None and bool(self.is_cycle_full())
-        for attempt in range(1, self.SWITCH_VERIFY_ATTEMPTS + 1):
-            self._switch_to_char(
-                char,
-                current_char=current,
-                has_intro=False,
-                retry_intro=False,
-                log_prefix="four_combo switch",
-            )
-            if self._verify_current_char(char):
-                break
-            detection = self._get_current_char_detection(
-                frame=self.frame, char_count=self.team_size
-            )
-            logger.warning(
-                f"four combo switch verify failed, want {char.index}, "
-                f"got {detection.index} (reason={detection.reason}, attempt={attempt})"
-            )
+        self._switch_to_char(
+            char,
+            current_char=current,
+            has_intro=False,
+            retry_intro=False,
+            log_prefix="four_combo switch",
+        )
         self._entry_skill_until = time.time() + self.ENTRY_SKILL_WAIT if entry_skill else 0.0
-
-    def _verify_current_char(self, char, timeout=None):
-        """轮询图像检测确认目标角色在场, 避免切人后画面滞后导致的误判."""
-        if timeout is None:
-            timeout = self.SWITCH_VERIFY_TIMEOUT
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            detection = self._get_current_char_detection(
-                frame=self.frame, char_count=self.team_size
-            )
-            if detection.accepted and detection.index == char.index:
-                return True
-            self.sleep(0.05)
-        return False

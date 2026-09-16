@@ -66,8 +66,9 @@
 
 ### 1.5 浮游炮（伊洛伊）
 
-点 Q → 长按左键（**长按/等待对齐原版 `Iroi._wait_ultimate_unfreeze`**：`mouse_down` 后等 `box_ultimate` 图标变化 / Q 不可用）→ 松手 → 睡 **0.3s** → **单击左键**。
+点 Q → **等特写/动画结束**（`is_in_team`，对齐原版 `click_ultimate` 的 `_wait_action_animation`）→ 长按左键（**对齐原版 `Iroi._wait_ultimate_unfreeze`**：`mouse_down` 后等 `box_ultimate` 图标变化 / Q 不可用）→ 松手 → 睡 **0.3s** → **单击左键**。
 - 说明：`mouse_down`/等待逻辑沿用原版出招表（`iroi._wait_ultimate_unfreeze`）；结尾 `sleep 0.3s + 单击左键` 是本脚本规范额外要求的，不在原版里。
+- 实测手动节奏（`input_record`）：Q 后约 **2.9s** 才长按，长按约 **0.86s**，松手后约 **0.07s** 单击。当前用 `is_in_team` 等特写；若仍不够可改成显式等待。
 
 ### 1.6 闪避反击反应
 
@@ -160,8 +161,8 @@ COMBO_RELEASE_GAP=0.06  COMBO_CLICK_GAP=0.05
 SKILL_REGISTER_TIMEOUT=2.0  DAFFODILL_SKILL_REGISTER_TIMEOUT=0.5
 GOLD_THRESHOLD=0.7  DAFFODILL_FIELD_TIME=1.5  PAD_FIELD_TIME=1.5  IROI_FUNNEL_POST_SLEEP=0.3
 Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTERVAL=0.12
-ENTRY_SKILL_WAIT=1.6  SWITCH_VERIFY_ATTEMPTS=3  SWITCH_VERIFY_TIMEOUT=1.0
-SUPPRESS_SWITCH_CLICK=True  CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
+ENTRY_SKILL_WAIT=1.6  SUPPRESS_SWITCH_CLICK=True  IROI_FUNNEL_ANIMATION_TIMEOUT=4.0
+CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
 SOUND_REACTION_DAFFODILL_TIME=1.0  SOUND_IMMEDIATE_SPAM_TIME=1.2  SCRIPT_TICK=0.05
 ACTION_LOG_PATH=logs/four_combo_actions.log
 ```
@@ -198,9 +199,8 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 9. **中文标点**：新增/修改 Python 源码注释和字符串时用 ASCII `,` `;`（仓库 AGENTS.md 要求）。
 10. **日志脱敏**：不要提交用户日志、截图、账号、本机隐私路径。
 11. **Z 盘是 ramdisk**：重启清空，仓库必须放 C 盘。
-12. **`_switch_to_char` 的 `active health change` 会误判切换成功**：切人键在动画/特写期间可能被游戏忽略，但血量变化被当成"切换完成"，`is_current_char` 被错误置位，后续读错角色的 Q/E（实测残虹没上场，脚本却以为上场 → 双 Q 读的是别人的 Q 判为不可用）。判别：`is_char_at_index` 日志里 `conf=0.750`（= `reject_score`）说明"检测到的当前角色不是目标"。修法：`_switch_to` 切人后用 `_verify_current_char`（`_get_current_char_detection(frame=...)` 图像检测，绕过 sticky tracker）**轮询**确认，失败则重试，最多 `SWITCH_VERIFY_ATTEMPTS` 次。
-    - 注意：切人后画面有滞后，**必须轮询等待**（`SWITCH_VERIFY_TIMEOUT`），立即检测会读到旧画面而误报，进而触发多余重试（表现为切人键/`switch_char_click` 狂发）。
-    - `SUPPRESS_SWITCH_CLICK=True` 时跳过框架切人自带的 `switch_char_click` 左键点击，避免"二连前先点按几下"。
+12. **切人检测不可靠，别叠加"二次验证"**：`_switch_to_char` 的 `active health change` 会误判；但 `_get_current_char_detection`（active_marker）同样不可靠（实测残虹已上场却连续 3s 报 `got 1`）。曾加过 `_verify_current_char` 轮询+重试，结果**每次失败轮询 1s ×3 次 ≈ 3s**，把达芙蒂尔/切换环节严重拖长（日志 `10:34:44~47` 连续 `verify failed want 0 got 1`）。**已移除**，回到单次 `_switch_to_char`。判别检测是否靠谱看 `info_set current char idx X conf Y`：`conf=0.750`（= `reject_score`）表示"检测到的当前角色不是目标"。
+    - `SUPPRESS_SWITCH_CLICK=True` 跳过框架切人自带的 `switch_char_click` 左键点击，避免"二连前先点按几下"。
 
 ---
 
@@ -224,8 +224,9 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - **修复切人误判（残虹没上场但脚本以为上场）**：`_switch_to` 增加 `_verify_current_char` 图像验证 + 重试（`SWITCH_VERIFY_ATTEMPTS=2`），避免 `active health change` 把未完成的切换当成功。
 - 新增独立流程日志 `logs/four_combo.log`（过滤 handler），排查时优先读它，避免 `ok-script.log` 前段无关日志。
 - 修复切人验证误报：`_verify_current_char` 改为**轮询等待**（`SWITCH_VERIFY_TIMEOUT=1.0`），`SWITCH_VERIFY_ATTEMPTS=3`；新增 `SUPPRESS_SWITCH_CLICK=True` 跳过切人自带左键点击（对应"二连先点按几下"）。
-- 浮游炮 `_iroi_q_funnel` 长按/等待对齐原版出招表（复用 `iroi._wait_ultimate_unfreeze`，等 `box_ultimate` 图标变化），结尾保留本脚本的 `sleep 0.3s + 单击左键`。
+- 浮游炮 `_iroi_q_funnel` 长按/等待对齐原版出招表（复用 `iroi._wait_ultimate_unfreeze`，等 `box_ultimate` 图标变化），并补上原版的"等特写结束"（`is_in_team`，`IROI_FUNNEL_ANIMATION_TIMEOUT=4.0`）；结尾保留本脚本的 `sleep 0.3s + 单击左键`。
 - `_zankou_fixed_step` 增加 Q 状态诊断日志（`q_available` / `q_cd` / `lit` / `current`），用于排查主循环双 Q 未触发。
+- **移除切人二次验证**：`_verify_current_char` 轮询+重试在实测中反复误报（达芙蒂尔站场被拖长 ~3s/次），已回退到单次 `_switch_to_char`。
 
 **实测已知问题（最近一轮日志结论）**：
 - `is_in_team` 动画判断失效 → 已修（移除）。
