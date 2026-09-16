@@ -1182,14 +1182,13 @@ class BaseCombatTask(CharElementUIMixin, CombatCheck):
             self.draw_boxes(boxes=ret, color="red")
         else:
             ret = None
-        self.log_info("char:{}, ult:{}, conf:{}".format(index, bool(ret), conf))
-        # self.run_with_interval(
-        #     lambda: self.log_info(
-        #         "char:{}, ult:{}, conf:{}".format(index, bool(ret), conf)
-        #     ),
-        #     interval=1,
-        #     action_name="ultimate_available",
-        # )
+        self.run_with_interval(
+            lambda: self.log_info(
+                "char:{}, ult:{}, conf:{}".format(index, bool(ret), conf)
+            ),
+            1,
+            action_name=f"ultimate_available_log_{index}",
+        )
         return ret
 
 
