@@ -29,7 +29,7 @@
 8. 残虹**可控后**，做**残虹二连**。
 9. 切**伊洛伊**，点 Q → **触发浮游炮**。
 10. 切**残虹二连**。
-11. 切**达芙蒂尔**，按 E，然后连点左键；达芙蒂尔**在场 2 秒后**切残虹二连；再切达芙蒂尔连点；2 秒后切残虹二连……**循环直到残虹环合值满**。
+11. 切**达芙蒂尔**，按 E，然后连点左键；达芙蒂尔**在场 1.5 秒后**切残虹二连；再切达芙蒂尔连点；1.5 秒后切残虹二连……**循环直到残虹环合值满**。
 12. 切**伊洛伊** → 进入主循环起点。
 
 ### 1.2 主循环（起点 = 伊洛伊）
@@ -47,8 +47,8 @@
   - CD ≥ 2s → 只做二连。
 - **达芙蒂尔循环**（重复直到残虹环合满）：
   - 达芙蒂尔 Q/E **能放就放**，不能就**连点普攻**；
-  - 达芙蒂尔**在场 2 秒**（真实时间，含大招动画）→ 切残虹二连；
-  - **若达芙蒂尔 Q 可放**：放完 Q（**可控后**）**立即**切残虹二连，不等 2 秒。
+  - 达芙蒂尔**在场 1.5 秒**（真实时间，含大招动画）→ 切残虹二连；
+  - **若达芙蒂尔 Q 可放**：放完 Q（**可控后**）**立即**切残虹二连，不等 1.5 秒。
 - 残虹环合满 → 切**伊洛伊** → 回到主循环起点。
 
 ### 1.3 残虹二连（核心操作）
@@ -91,7 +91,7 @@
 - 固定 1~4 号位；**取消**“检测四人是否都在队里”的保险。
 - “立即切换”先接受框架 ~0.3s 的切人确认延迟，稳定后再考虑硬切。
 - 声音闪避反击**开启**，会抢占输入（在预期之内）。
-- 达芙蒂尔 E 冷却 16s，2 秒窗口内不会重复放。
+- 达芙蒂尔 E 冷却 16s，1.5 秒窗口内不会重复放。
 
 ---
 
@@ -157,7 +157,7 @@
 COMBO_HOLD_MIN=0.7  COMBO_HOLD_MAX=2.0  COMBO_POLL_INTERVAL=0.05
 COMBO_RELEASE_GAP=0.1  COMBO_CLICK_GAP=0.05
 SKILL_REGISTER_TIMEOUT=1.0  DAFFODILL_SKILL_REGISTER_TIMEOUT=0.5
-GOLD_THRESHOLD=0.7  DAFFODILL_FIELD_TIME=2.0  IROI_FUNNEL_POST_SLEEP=0.3
+GOLD_THRESHOLD=0.7  DAFFODILL_FIELD_TIME=1.5  IROI_FUNNEL_POST_SLEEP=0.3
 Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTERVAL=0.12
 ENTRY_SKILL_WAIT=1.6  CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
 SOUND_REACTION_DAFFODILL_TIME=1.0  SOUND_IMMEDIATE_SPAM_TIME=1.2  SCRIPT_TICK=0.05
@@ -211,6 +211,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - 达芙蒂尔在场窗口的 E 改为 `_skill_until_registered`，修复声音反击/达芙蒂尔循环里 `click_skill()` 阻塞导致达芙蒂尔卡场、不按时切回残虹。
 - 主循环伊洛伊补齐 **E**（原只在开局放，缺增伤）：切伊洛伊 → E → Q → 浮游炮。
 - 所有角色 E 统一为 `_skill_until_registered`（残虹金 E / 伊洛伊 / 早雾 / 达芙蒂尔），做到“观察到 E 进 CD 立即切人”，不再等 `click_skill()` 动画收尾。
+- 达芙蒂尔在场窗口 `DAFFODILL_FIELD_TIME` 由 2.0s 调整为 **1.5s**。
 
 **实测已知问题（最近一轮日志结论）**：
 - `is_in_team` 动画判断失效 → 已修（移除）。
