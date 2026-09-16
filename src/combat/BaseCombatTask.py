@@ -1048,62 +1048,50 @@ class BaseCombatTask(CharElementUIMixin, CombatCheck):
         logger.debug(f"load_chars cost {time.perf_counter() - now:.3f}s")
         return ret
 
-    def is_cycle_full(self) -> bool:
+    def cycle_ratio(self) -> float:
+        """当前角色环合条的填充比例 (0.0~1.0+).
+
+        取环合环 12 点方向与 6 点方向的白像素密度之比; 未满时 12 点方向有缺口,
+        所以比值随填充升高。下半部分全黑时返回 0.0。
+        """
         img = self.box_of_screen_scaled(
             2560, 1440, 944, 1316, width_original=66, height_original=66
         ).crop_frame(self.frame)
         h, w = img.shape[:2]
         side = h
 
-        # 1. 预处理：灰度化 + 二值化
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
 
-        # 2. 构造环形掩模 (Mask) —— 进一步排除干扰
-        # 环厚度约 12%，我们可以只看这个半径范围内的像素
         mask = np.zeros((h, w), dtype=np.uint8)
         center = (w // 2, h // 2)
         outer_r = side // 2
-        inner_r = int(outer_r * (1 - 0.15))  # 稍微多给一点余量，取15%
+        inner_r = int(outer_r * (1 - 0.15))
         cv2.circle(mask, center, outer_r, 255, -1)
         cv2.circle(mask, center, inner_r, 0, -1)
 
-        # 应用掩模，只保留环形区域
         ring_only = cv2.bitwise_and(thresh, thresh, mask=mask)
 
-        # 3. 取样区定义 (核心：对比顶部和底部)
-        # 取顶部中心 10%x10% 的区域，以及底部中心同样的区域
         roi_size = int(side * 0.1)
-        margin = int(side * 0.02)  # 避开最边缘可能存在的黑边
+        margin = int(side * 0.02)
 
-        # 顶部采样区 (12点钟方向)
         top_roi = ring_only[
             margin : margin + roi_size, (w // 2 - roi_size // 2) : (w // 2 + roi_size // 2)
         ]
-
-        # 底部采样区 (6点钟方向)
         bottom_roi = ring_only[
             (h - margin - roi_size) : (h - margin),
             (w // 2 - roi_size // 2) : (w // 2 + roi_size // 2),
         ]
 
-        # 4. 计算白色像素密度
-        top_density = np.sum(top_roi == 255)
-        bottom_density = np.sum(bottom_roi == 255)
-
-        # 5. 精准判断逻辑
-        # 如果满了，top_density 应该和 bottom_density 非常接近
-        # 如果没满（有缺口），top_density 会显著低于 bottom_density
+        top_density = int(np.sum(top_roi == 255))
+        bottom_density = int(np.sum(bottom_roi == 255))
         if bottom_density == 0:
-            return False  # 防止除以0
+            return 0.0
+        return top_density / bottom_density
 
-        ratio = top_density / bottom_density
+    def is_cycle_full(self) -> bool:
+        return self.cycle_ratio() > 0.9
 
-        # 阈值建议：如果 ratio > 0.9，认为已经满了
-        # “差一点点”的时候，由于缺口正好在顶部，这个 ratio 会瞬间降到 0.5 以下甚至更低
-        is_full = ratio > 0.9
-
-        return is_full
 
     def walk_until_combat(
         self, direction="w", time_out=10, run=False, delay=0, raise_if_not_found=False

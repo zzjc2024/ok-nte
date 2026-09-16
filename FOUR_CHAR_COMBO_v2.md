@@ -28,13 +28,14 @@
 
 ### 1.2 主循环（起点 = 伊洛伊）
 
-- **伊洛伊**：切到后先点 **E**；Q 可放 → Q + 浮游炮；不可放 → 垫刀（在伊洛伊身上打 `PAD_FIELD_TIME=1.5s` → 残虹二连 → 切回伊洛伊）重复直到 Q 可放。
+- **伊洛伊**：切到后先点 **E**；Q 可放 → Q + 浮游炮；不可放 → 垫刀（在伊洛伊身上打 `PAD_FIELD_TIME=1.5s` → 残虹二连 → 切回伊洛伊）重复直到 Q 可放。**浮游炮之后先切残虹二连，再切早雾**（`_zankou_combo_switch(self.sakiri)`）。
 - **早雾**：Q 可放 → Q；不可放 → 同样垫刀；然后点 **E**（观察到进 CD 即切残虹）。
 - **残虹固定步骤**（双 Q **只在这里**，读 `get_cd("ultimate")`）：
   - Q 亮 → 双 Q → 二连；
   - Q 没亮但 CD < `ZANKOU_Q_READY_WINDOW=2s` → 留场连点左键等 Q 亮 → 双 Q → 二连；
   - CD ≥ 2s → 只做二连。
 - **达芙蒂尔循环**（重复直到残虹环合满）：达芙蒂尔 Q/E 能放就放，否则连点普攻；在场 `DAFFODILL_FIELD_TIME=1.5s` → 切残虹二连；**若 Q 可放**，放完 Q（可控后）立即切残虹二连，不等 1.5s。
+- **环合 ≥90% 不再互切**：`_zankou_combo_switch` 里读 `cycle_ratio()`，`>= CYCLE_STAY_RATIO(0.9)` 时**不再切达芙蒂尔**，而是留在残虹身上连点左键（`_stay_until_cycle_full`）直到环合满，然后切伊洛伊。
 - 残虹环合满 → 切**伊洛伊** → 回主循环起点。
 
 ### 1.3 残虹二连
@@ -45,10 +46,11 @@
 
 1. 切残虹后先 `_wait_in_team(ENTRY_SKILL_WAIT=1.6s)` 等脱离切人/入场动画；
 2. **连按 Q**（`send_ultimate_key` 每 ~`Q_PRESS_INTERVAL=0.12s`，冷却中按键被忽略）；
-3. 数**大招动画次数**：`is_in_team()` True→False 记一次，数到 **2 次**才停（第一段、第二段特写）；
-4. `_wait_in_team(CONTROLLABLE_TIMEOUT)` 等第二段动画结束；
-5. `_wait_cd_at_most(ZANKOU_Q_CD_COMBO_READY=19.7)` 等右下角 Q 冷却数字降到 **≤19.7** 才让上层做二连。
-   - **不要只等"CD 首次变小"**：一段 Q 结束、二段 Q 之前 CD 会先小幅跳一次，只等首次变小会让二连提前好几秒（表现为"长按太早、没生效"）。二段 Q 特写期间 CD 是冻结的，特写结束后才继续往下跳，所以用固定上限 19.7。
+3. `_press_q_through_animations()` 依次确认 **4 个阶段**：`enter1`（第 1 段进特写）→ `exit1` → `enter2`（第 2 段进特写）→ `exit2`。每阶段要求 `is_in_team()` 稳定保持 `ANIMATION_STABLE_TIME=0.3s` 才算确认，防止特写期间状态抖动把动画数错；
+4. 4 阶段全部确认后 `_wait_cd_ticking()`：等右下角 Q 冷却数字**首次变小**，然后上层才做二连。
+
+> 为什么是"4 阶段确认后再等 CD 变化"，而不是固定 `CD ≤ 19.7` 或"CD 首次变小"：
+> 一段 Q 结束、二段 Q 之前 CD 会先小幅跳一次；如果从双 Q 一开始就盯 CD，会在**第 1 段动画刚结束**时就触发，二连提前好几秒（表现为"长按太早、没生效"）。现在 CD 只在 `exit2` 之后才开始采样，所以看到的一定是二段特写结束、CD 恢复计时后的第一次变化。
 
 > 依据：`BaseChar._wait_action_animation` 就是用 `is_in_team` 判断大招动画进入/脱离；多场日志证实特写期间 `is_in_team` 连续 False ~2s。
 
@@ -127,10 +129,12 @@
 | `_pad_until_q` | 伊洛伊/早雾 Q 不可放时的垫刀；记录 `_pad_target` 供声音反击用 |
 | `_skill_until_registered` | 只在 E 图标亮时连按 E 到 E 进 CD 即返回（替代阻塞的 `click_skill`） |
 | `_zankou_gold_e` / `_zankou_combo` / `_hold_until_gold` | 开局金 E / 二连 / 长按轮询金 E |
-| `_zankou_double_q` | 双 Q（连按 Q + 数大招动画到 2 次 + 等 CD 跳） |
+| `_zankou_double_q` / `_press_q_through_animations` | 双 Q（连按 Q + 确认 enter1/exit1/enter2/exit2 + 等 CD 变化） |
+| `_zankou_combo_switch` / `_stay_until_cycle_full` | 切残虹二连后按 `cycle_ratio()` 决定切谁；环合 ≥0.9 时留场打到满 |
 | `_cast_q` / `_press_q_ready` / `_press_q_until_registered` / `_q_registered` | 单 Q：连按到注册 + 等可控 |
 | `_iroi_q_funnel` / `_wait_iroi_cutscene` | 浮游炮 / 等脱离大招动画 |
-| `_wait_controllable` / `_wait_cd_at_most` / `_wait_in_team` | 可控 / 等 Q 冷却降到指定值 / 脱离动画 |
+| `_wait_controllable` / `_wait_cd_ticking` / `_wait_in_team` | 可控 / 等 Q 冷却首次变小 / 脱离动画 |
+| `_maybe_log_combat_state` | 低频打印各脱战信号，定位"敌人已死但 in_combat 仍为 True" |
 | `_sound_dodge_action` / `_sound_counter_action` | 听到攻击警报：只按闪避（反击已改由闪避成功音触发） |
 | `_sound_dodge_success_action` | 听到闪避成功音：残虹 → 点左键 0.08s + 等 0.18s + 二连；非残虹 → `_sound_immediate_reaction` |
 | `_sound_immediate_reaction` / `_maybe_handle_sound_counter` | 非残虹反击：连点左键 + 连点切人键，随后主循环切残虹打二连 |
@@ -149,7 +153,8 @@ Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTER
 ENTRY_SKILL_WAIT=1.6  SUPPRESS_SWITCH_CLICK=True  SWITCH_CONFIRM_TIMEOUT=3.0
 SKILL_REGISTER_TIMEOUT=2.0  DAFFODILL_SKILL_REGISTER_TIMEOUT=0.5
 CYCLE_BAR_VISIBLE_MIN_PIXELS=20  IROI_FUNNEL_ANIMATION_TIMEOUT=5.0
-CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0  ZANKOU_Q_CD_COMBO_READY=19.7
+CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
+ANIMATION_STABLE_TIME=0.3  CYCLE_STAY_RATIO=0.9  COMBAT_STATE_LOG_INTERVAL=2.0
 SOUND_IMMEDIATE_SPAM_TIME=1.2  SOUND_SUCCESS_CLICK_DOWN=0.08  SOUND_SUCCESS_WAIT=0.18  SCRIPT_TICK=0.05
 ACTION_LOG_PATH=logs/four_combo_actions.log
 ```
@@ -191,11 +196,16 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 ### 5.4 环合
 | 方法 | 说明 |
 |---|---|
-| `is_cycle_full()` | 环形白像素密度（2560x1440 下 `944,1316`）；读的是**当前角色** |
-| `_cycle_bar_white_pixels()` | 同款环形区域的白像素数 |
+| `cycle_ratio()` | 环合条填充比例（12 点方向 / 6 点方向白像素密度比，2560x1440 下 `944,1316`）；读的是**当前角色** |
+| `is_cycle_full()` | `cycle_ratio() > 0.9`（原实现，行为不变） |
+| `_cycle_bar_white_pixels()` | 同款环形区域的白像素数（本任务加，仅对照采样） |
 
 ### 5.5 战斗
-`in_combat()` / `do_check_in_combat()`（scene 缓存 + combat_detect）、`combat_detect(frame, target, lv, force)`、`is_boss()`（boss Lv 文字模板）、`has_health_bar()` / `_find_red_health_bar()`（敌人红血条颜色块）、`find_target(sync, frame, force)`（OpenVINO）、`find_lv(frame, threshold)`、`combat_detect_uncertain`。
+`in_combat()` / `do_check_in_combat()`（scene 缓存 + combat_detect）、`combat_detect(frame, target, lv, force)`、`is_boss()`（boss Lv 文字模板）、`has_health_bar()` / `_find_red_health_bar()`（敌人红血条颜色块）、`find_target(sync, frame, force)`（OpenVINO）、`find_lv(frame, threshold)`、`combat_detect_uncertain`、`combat_detect_state.miss_count`、`_boss_fight`。
+
+**脱战判定链**（`src/combat/CombatCheck.py`，本任务没有额外判定）：
+`do_check_in_combat()` → `_check_active_combat()` → `async_combat_detect()`（Lv + target）→ `_update_combat_detect_state()`（`miss_required=1`，首次未命中给 `uncertain_seconds=0.5` 宽限并 `middle_click()` 重锁）→ 宽限过后 `_recover_or_end_combat()`（`target_enemy` 最多 `target_enemy_time_out=3s` 反复 `middle_click` 重锁）→ 全失败才 `reset_to_false()`。
+即**至少 ~3.5s 连续丢失 + 反复尝试重锁**才算彻底脱战。
 
 ### 5.6 通用视觉 / OCR
 `find_one` / `find_feature`（模板匹配）、`find_best_match_in_box` / `find_first_match_in_box`、`ocr(x,y,to_x,to_y, match, ...)`、`openvino_detect(...)`、`calculate_color_percentage(color, box)`、`find_color_rectangles`（ok）。
@@ -233,8 +243,10 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 ## 7. 日志 / 环境 / 命令 / 版本管理
 
 ### 日志（排查优先读前两个）
-- **流程日志（首选）**：`logs/four_combo.log`。`_ensure_combo_log_handler()` 给 `ok` logger 挂带 `_ComboLogFilter` 的 FileHandler，只放行含 `FourCharComboTask` / `four_combo` / `four char combo` / `CombatCheck` / `Dodge` / `SoundCombatContext` / `SoundListener` 的行，内容干净。`__init__` 与每次 `run()` 确保 handler 存在。
-- **键鼠日志**：`logs/four_combo_actions.log`。格式 `HH:MM:SS.mmm +间隔s [phase] 操作`；每次启动写 `==== session YYYY-MM-DD HH:MM:SS ====`。phase 取值：`precombat_gold_e` / `precombat_daffodill_q` / `opener` / `loop` / `pad_until_q` / `zankou_gold_e` / `zankou_enter` / `zankou_combo` / `zankou_double_q` / `iroi_funnel` / `daffodill_window` / `sound_success`。本地生成物，不要提交。
+- **流程日志（首选）**：`logs/four_combo.log`。`_ensure_combo_log_handler()` 给 `ok` logger 挂带 `_ComboLogFilter` 的 FileHandler；放行条件 = **日志正文或 logger 名**含 `FourCharComboTask` / `four_combo` / `four char combo` / `CombatCheck` / `Dodge` / `SoundCombatContext` / `SoundListener` 任一。`__init__` 与每次 `run()` 确保 handler 存在。
+  - 看 logger 名是为了让这些模块自身的日志也能进来（否则形如 `Zankou skill registered` 这种不含关键词的正文会被漏掉）。
+  - 排查"敌人死了但还卡在战斗状态"：搜 `four char combo combat state [tag]`，这行由 `_maybe_log_combat_state()` 每 `COMBAT_STATE_LOG_INTERVAL=2s` 打印一次，含 `in_combat / scene_cache / uncertain / miss / boss_flag / is_boss / lv / target / health_bar`，一眼看出是哪个信号把战斗状态按住了。
+- **键鼠日志**：`logs/four_combo_actions.log`。格式 `HH:MM:SS.mmm +间隔s [phase] 操作`；每次启动写 `==== session YYYY-MM-DD HH:MM:SS ====`。phase 取值：`precombat_gold_e` / `precombat_daffodill_q` / `opener` / `loop` / `pad_until_q` / `zankou_gold_e` / `zankou_enter` / `zankou_combo` / `zankou_double_q` / `zankou_cycle_full` / `iroi_funnel` / `daffodill_window` / `sound_success` / `sound_success_interrupt`。本地生成物，不要提交。
 - 全量日志：`logs/ok-script.log`（每天午夜轮转、保留 7 天）。
 
 ### 环境

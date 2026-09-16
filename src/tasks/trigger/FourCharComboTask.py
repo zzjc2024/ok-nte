@@ -30,14 +30,20 @@ _COMBO_LOG_KEYWORDS = (
 
 
 class _ComboLogFilter(logging.Filter):
-    """只放行四人连招排查相关的日志行."""
+    """只放行四人连招排查相关的日志行.
+
+    正文和 logger 名都看: 这样 FourCharComboTask / CombatCheck / SoundListener
+    等模块自身的日志也能进来, 否则形如 "Zankou skill registered" 这种不含关键词
+    的正文会被漏掉。
+    """
 
     def filter(self, record):
         try:
             message = record.getMessage()
         except Exception:
             return False
-        return any(keyword in message for keyword in _COMBO_LOG_KEYWORDS)
+        name = record.name or ""
+        return any(keyword in message or keyword in name for keyword in _COMBO_LOG_KEYWORDS)
 
 
 def _ensure_combo_log_handler():
@@ -92,7 +98,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     DAFFODILL_SKILL_REGISTER_TIMEOUT = 0.5
     CONTROLLABLE_TIMEOUT = 10.0
     ZANKOU_Q_READY_WINDOW = 2.0
-    ZANKOU_Q_CD_COMBO_READY = 19.7
+    ANIMATION_STABLE_TIME = 0.3
+    CYCLE_STAY_RATIO = 0.9
+    COMBAT_STATE_LOG_INTERVAL = 2.0
     SOUND_IMMEDIATE_SPAM_TIME = 1.2
     SOUND_SUCCESS_CLICK_DOWN = 0.08
     SOUND_SUCCESS_WAIT = 0.18
@@ -114,6 +122,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._in_sound_reaction = False
         self._pad_target = None
         self._alert_interrupt = threading.Event()
+        self._combat_state_logged_at = 0.0
         self._action_phase = ""
         self._action_log_handle = None
         self._action_log_last = 0.0
@@ -255,6 +264,33 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             self._last_run_state = state
             logger.info(f"four char combo state: {state}")
 
+    def _maybe_log_combat_state(self, tag):
+        """低频打印各脱战信号, 用于定位"敌人已死但 in_combat 仍为 True".
+
+        写进 logs/four_combo.log, 打死敌人后如果卡在战斗状态, 直接看这行就知道是
+        哪个信号(scene 缓存 / boss / lv / target / 红血条 / uncertain)把状态按住了。
+        """
+        now = time.time()
+        if now - self._combat_state_logged_at < self.COMBAT_STATE_LOG_INTERVAL:
+            return
+        self._combat_state_logged_at = now
+        self.next_frame()
+        try:
+            state = (
+                f"in_combat={bool(self._in_combat)} "
+                f"scene_cache={self.scene.in_combat()} "
+                f"uncertain={self.combat_detect_uncertain} "
+                f"miss={self.combat_detect_state.miss_count} "
+                f"boss_flag={self._boss_fight} "
+                f"is_boss={bool(self.is_boss())} "
+                f"lv={bool(self.find_lv())} "
+                f"target={bool(self.find_target())} "
+                f"health_bar={self.has_health_bar()}"
+            )
+        except Exception as e:
+            state = f"error={e}"
+        logger.info(f"four char combo combat state [{tag}] {state}")
+
     # ----------------------------------------------------------- action log
 
     def _action_log(self, text):
@@ -373,6 +409,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     def _loop_once(self):
         self._set_action_phase("loop")
         with self._suspend_combat_check():
+            self._maybe_log_combat_state("loop")
             self._maybe_handle_sound_counter()
 
             iroi = self.iroi
@@ -381,6 +418,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             if not iroi.ultimate_available() and not self._pad_until_q(iroi):
                 return
             self._iroi_q_funnel()
+
+            if self._zankou_combo_switch(self.sakiri) is self.iroi:
+                return
 
             sakiri = self.sakiri
             self._switch_to(sakiri)
@@ -413,6 +453,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     def _daffodill_until_cycle_full(self):
         daffodill = self.daffodill
         while self.in_combat():
+            self._maybe_log_combat_state("daffodill_loop")
             self._switch_to(daffodill)
             self._daffodill_window(daffodill)
             if self._zankou_combo_switch(daffodill) is self.iroi:
@@ -528,14 +569,35 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         return False
 
     def _zankou_combo_switch(self, default_target):
+        """切残虹二连, 再按环合值决定去向.
+
+        环合 >= CYCLE_STAY_RATIO 时不再和达芙蒂尔互切: 留在残虹身上连点左键直到环合满,
+        然后切伊洛伊; 否则切 default_target。
+        """
         self._set_action_phase("zankou_enter")
         self._switch_to(self.zankou)
         self._zankou_combo()
-        if self.is_cycle_full():
+        ratio = self.cycle_ratio()
+        if ratio >= self.CYCLE_STAY_RATIO:
+            logger.info(
+                f"four char combo cycle ratio={ratio:.2f} >= {self.CYCLE_STAY_RATIO}, "
+                f"stay on zankou until full"
+            )
+            self._stay_until_cycle_full()
             self._switch_to(self.iroi)
             return self.iroi
         self._switch_to(default_target)
         return default_target
+
+    def _stay_until_cycle_full(self):
+        """留在残虹身上连点左键, 直到环合满或脱战."""
+        self._set_action_phase("zankou_cycle_full")
+        while self.in_combat() and not self.is_cycle_full():
+            self._maybe_handle_sound_counter()
+            self.next_frame()
+            self.click()
+            self.sleep(0.1)
+        logger.info(f"four char combo cycle full ratio={self.cycle_ratio():.2f}")
 
     def _hold_until_gold(self, interrupt_event=None):
         """长按轮询金 E; 返回 True 表示被 interrupt_event 打断."""
@@ -577,6 +639,12 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         return interrupted
 
     def _zankou_double_q(self):
+        """残虹双 Q.
+
+        连按 Q, 依次确认四个阶段: 第1段进特写 -> 第1段出特写 -> 第2段进特写 -> 第2段出特写;
+        四个阶段都确认后才开始盯 Q 冷却数字, 一有变化就交回上层做二连。
+        这样能避免"第1段动画刚结束就提前二连"。
+        """
         self._set_action_phase("zankou_double_q")
         zankou = self.zankou
         logger.info(
@@ -587,33 +655,47 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         if not self._press_q_ready(zankou):
             return
         self._wait_in_team(timeout=self.ENTRY_SKILL_WAIT)
-        animations = 0
-        in_animation = False
-        last_press = 0.0
         deadline = time.time() + self.Q_DOUBLE_TIMEOUT
         with self.skip_sleep_checks() as skip:
             skip.check_combat = True
-            while animations < 2 and time.time() < deadline:
-                now = time.time()
-                if now - last_press >= self.Q_PRESS_INTERVAL:
-                    zankou.send_ultimate_key(
-                        action_name="four_combo_q", interval=0.1, down_time=0.05
-                    )
-                    last_press = now
-                if not self.is_in_team():
-                    if not in_animation:
-                        in_animation = True
-                        animations += 1
-                        logger.info(f"zankou q animation {animations} entered")
-                else:
-                    in_animation = False
-                self.sleep(self.SCRIPT_TICK)
-        if animations >= 2:
+            stage = self._press_q_through_animations(zankou, deadline)
+        if stage >= 4:
             logger.info("zankou double q done (2 animations)")
         else:
-            logger.warning(f"zankou double q incomplete, animations={animations}")
+            logger.warning(f"zankou double q incomplete, stage={stage}/4")
         self._wait_in_team(timeout=self.CONTROLLABLE_TIMEOUT)
-        self._wait_cd_at_most(self.ZANKOU_Q_CD_COMBO_READY)
+        self._wait_cd_ticking()
+
+    def _press_q_through_animations(self, zankou, deadline):
+        """连按 Q 并等待四个阶段确认; 返回已确认的阶段数(0~4).
+
+        阶段: enter1(第1段特写进入) / exit1 / enter2 / exit2。
+        每个阶段都要求 is_in_team 稳定保持 ANIMATION_STABLE_TIME 才算确认,
+        防止特写期间的状态抖动把动画数错。
+        """
+        stages = ("enter1", "exit1", "enter2", "exit2")
+        stage = 0
+        stable_since = None
+        last_press = 0.0
+        while stage < len(stages) and time.time() < deadline:
+            now = time.time()
+            if now - last_press >= self.Q_PRESS_INTERVAL:
+                zankou.send_ultimate_key(
+                    action_name="four_combo_q", interval=0.1, down_time=0.05
+                )
+                last_press = now
+            want_in_team = stages[stage].startswith("exit")
+            if bool(self.is_in_team()) == want_in_team:
+                if stable_since is None:
+                    stable_since = now
+                elif now - stable_since >= self.ANIMATION_STABLE_TIME:
+                    logger.info(f"zankou q {stages[stage]} confirmed")
+                    stage += 1
+                    stable_since = None
+            else:
+                stable_since = None
+            self.sleep(self.SCRIPT_TICK)
+        return stage
 
     def _wait_in_team(self, timeout=2.0):
         """等脱离大招动画(is_in_team 恢复)."""
@@ -759,26 +841,25 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         logger.warning(f"wait controllable timeout {char}")
         return False
 
-    def _wait_cd_at_most(self, limit):
-        """等大招 CD 数字降到 limit 及以下.
+    def _wait_cd_ticking(self):
+        """等大招 CD 数字开始变小.
 
-        二段 Q 特写期间 CD 数字是冻结的; 特写结束后才会继续往下跳。
-        只等"首次变小"会被一段 Q 与二段 Q 之间的那一小跳提前触发, 所以用固定上限。
+        只在"双 Q 四阶段全部确认之后"调用, 所以一段 Q 与二段 Q 之间那一小跳不会被看到;
+        真正等到的是二段特写结束后 CD 恢复计时的第一次变化。
         """
         start = time.time()
-        last_logged = None
+        previous = None
         with self.skip_sleep_checks() as skip:
             skip.check_combat = True
             while time.time() - start < self.CONTROLLABLE_TIMEOUT:
-                cd = self.get_cd("ultimate")
-                if 0 < cd <= limit:
-                    logger.info(f"zankou q cd {cd:.2f} <= {limit}, ready for combo")
+                remaining = self.get_cd("ultimate")
+                if remaining > 0 and previous is not None and remaining < previous - 0.001:
+                    logger.info(f"zankou q cd ticking {previous:.2f} -> {remaining:.2f}")
                     return True
-                if cd != last_logged:
-                    logger.info(f"zankou q cd {cd:.2f} waiting for <= {limit}")
-                    last_logged = cd
+                if remaining > 0:
+                    previous = remaining
                 self.sleep(self.SCRIPT_TICK)
-        logger.warning(f"wait zankou q cd <= {limit} timeout")
+        logger.warning("wait cd ticking timeout")
         return False
 
     def _q_button_lit(self):
