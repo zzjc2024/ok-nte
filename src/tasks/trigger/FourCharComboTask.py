@@ -86,6 +86,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     PAD_FIELD_TIME = 1.5
     IROI_FUNNEL_POST_SLEEP = 0.3
     Q_READY_TIMEOUT = 5.0
+    Q_WAIT_ATTACK_INTERVAL = 0.2
     Q_REGISTER_TIMEOUT = 3.0
     Q_DOUBLE_TIMEOUT = 8.0
     Q_PRESS_INTERVAL = 0.12
@@ -124,6 +125,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._pad_target = None
         self._alert_interrupt = threading.Event()
         self._combat_state_logged_at = 0.0
+        self._q_wait_attack_at = 0.0
         self._opener_lost_since = 0.0
         self._action_phase = ""
         self._action_log_handle = None
@@ -205,6 +207,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._suppress_combat_check = False
         self._alert_interrupt.clear()
         self._opener_lost_since = 0.0
+        self._q_wait_attack_at = 0.0
 
     def check_combat(self):
         """紧输入序列(开局)期间抑制战斗检测, 避免大招特写被误判脱战打断."""
@@ -789,8 +792,12 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         return True
 
     def _press_q_ready(self, char):
+        self._q_wait_attack_at = time.time()
         if self.wait_until(
-            char.ultimate_available, time_out=self.Q_READY_TIMEOUT, raise_if_not_found=False
+            char.ultimate_available,
+            time_out=self.Q_READY_TIMEOUT,
+            pre_action=self._q_wait_attack,
+            raise_if_not_found=False,
         ):
             return True
         logger.warning(
@@ -799,6 +806,18 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             f"current={self.get_current_char(raise_exception=False)})"
         )
         return False
+
+    def _q_wait_attack(self):
+        """等 Q 就绪期间继续普攻, 避免角色在场上站着发呆.
+
+        `wait_until` 的轮询循环不带 sleep, 所以这里自己做节流; `_press_q_ready`
+        开始时重置时间戳, 因此 Q 若很快可用则一次都不会多点。
+        """
+        now = time.time()
+        if now - self._q_wait_attack_at < self.Q_WAIT_ATTACK_INTERVAL:
+            return
+        self._q_wait_attack_at = now
+        self.click()
 
     def _press_q_until_registered(self, char, was_lit, timeout, stop_on_cd=True):
         """连按 Q 直到注册(CD出现或按钮变灭), 覆盖入场技/切人动画吃掉按键的情况."""
