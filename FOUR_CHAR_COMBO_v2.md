@@ -254,4 +254,5 @@ uv run --with ruff ruff check src\tasks\trigger\FourCharComboTask.py
 - 角色基类：`src/char/BaseChar.py`；战斗基类：`src/combat/BaseCombatTask.py`；当前角色检测：`src/utils/current_char_detector.py` + `src/tasks/mixin/CharUIMixin.py`。
 - 参考实现：`src/char/Hotori.py`（复杂协作）、`src/char/Iroi.py`（浮游炮 `_wait_ultimate_unfreeze`）、`src/char/Daffodill.py`、`src/char/Zankou.py`。
 - 手动键鼠录制工具：`tools/record_input.py` + `tools/record_input.cmd`（管理员启动，GUI 窗口；按钮开始/停止，热键 `F9` 开始 / `F10` 停止）。日志写 `logs/input_record_*.log`，格式与 `four_combo_actions.log` 一致，用于对齐手动与脚本时序。依赖 `pynput`（已在 `.venv`）。
+  - 该工具**同时监听"闪避成功音"**（模板 `assets/sounds/dodge_success.wav`，阈值 `DODGE_SUCCESS_THRESHOLD=0.45`，走 `SoundListener` 同一套 WASAPI 进程回环 + 匹配），命中时在事件流插入 `sound dodge_success score=...`。GUI 有勾选框开关和实时分数显示，用来测量"闪避成功后隔多久才长按/二连"。
 - 游戏音频录制工具：`tools/game_recorder_gui.py` + `tools/record_game_audio.cmd`（WASAPI 内录 loopback；按钮开始/停止，热键 `F11` 开始 / `F12` 停止），输出 `logs/game_audio_output.wav`，用于制作声音模板。依赖 `pyaudiowpatch` + `keyboard`，装在**仓库外的独立环境** `C:\tool\.venv-tools`，不碰项目 `.venv` 与全局 Python（建环境命令见启动脚本头部注释）。
