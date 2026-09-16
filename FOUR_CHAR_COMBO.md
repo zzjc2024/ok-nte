@@ -15,11 +15,13 @@
 
 ### 1.1 开局（每场战斗仅一次）
 
+> **入战前预判（脚本行为）**：未入战时若残虹在场，脚本**只轮询检测金 E，不做任何键鼠操作**（不自动长按、不点击、不切人）。**长按由玩家自己预判敌人出现提前操作**；脚本一旦检测到金 E，立即点 E、切达芙蒂尔，并在**入战前**等待达芙蒂尔 Q 可用后自动放 Q；随后检测到进入战斗才继续第 4 步（切伊洛伊放 E）。对应 `_precombat_gold_e` / `_precombat_daffodill_q`，入战前放过的达芙蒂尔 Q 在 `_opener` 里会跳过。
+
 1. 默认由**残虹**（固定 1 号位）进入战斗。
 2. **残虹金 E**：长按左键，约 0.5~1.5s 后 E 变金色（99% 情况 0.7s，不会超过 0.8s）；变金瞬间**松开再点 E**。
    - 若此时怪物发动强攻击，会触发工具的声音自动闪避；**闪避反击也会让 E 变金**，此时直接点 E。
    - 之后残虹**不再放 E**（除循环里可能因闪避再次金 E）。
-3. 切**达芙蒂尔**，点 Q。
+3. 切**达芙蒂尔**，点 Q（若已在入战前放过则跳过）。
 4. 达芙蒂尔**可控后**，切**伊洛伊**，点 E。
 5. 立即切**早雾**，点 Q。
 6. 早雾**可控后**，点 E，立即切**残虹**。
@@ -125,9 +127,14 @@
 |---|---|
 | `load_chars` | 按固定位置构造 4 个角色，绑定声音动作 |
 | `run` | 触发任务入口：未入战时做 `_precombat_gold_e`，入战后跑 `_run_rotation` |
-| `_precombat_gold_e` | 入战检测前，残虹在场且检测到金 E → 按 E 并切达芙蒂尔 |
-| `_run_rotation` | `_ensure_current(残虹)` → `_opener` → `while in_combat(): _loop_once` |
-| `_opener` | 1.1 的开局序列 |
+| `_precombat_gold_e` | 入战前**只检测**金 E（不做键鼠操作）；检测到 → 按 E、切达芙蒂尔、入战前放 Q |
+| `_precombat_daffodill_q` | 入战前在达芙蒂尔身上**只检测** Q，可用即放（不要求入战，非阻塞） |
+| `_reset_precombat` | 重置 `_opener_gold_e_done` / `_precombat_daffodill_q_done` / 声音待处理标记 / 日志 phase / 战斗检测抑制；`enable` 与 `combat_end` 调用 |
+| `check_combat` / `_suspend_combat_check` | 覆写 `check_combat`；紧输入序列(开局)期间抑制战斗检测，避免大招特写被误判脱战打断 |
+| `_run_rotation` | `_opener` → `while in_combat(): _loop_once`（不再强制先切残虹，避免打断入战前已切到位的达芙蒂尔） |
+| `_opener` | 1.1 的开局序列；入战前已放达芙蒂尔 Q 时跳过该步 |
+| `_action_log` / `_set_action_phase` / `_close_action_log` | 独立轻量键鼠操作日志（见第 8 节） |
+| `click` / `send_key` / `send_key_down` / `send_key_up` / `mouse_down` / `mouse_up` | 覆写以记录真实键鼠操作后转发 `super()` |
 | `_loop_once` | 1.2 的主循环一轮 |
 | `_zankou_fixed_step` | 早雾之后的残虹固定步骤（双 Q 只在这里） |
 | `_daffodill_until_cycle_full` / `_daffodill_window` | 达芙蒂尔循环 |
@@ -149,6 +156,7 @@ GOLD_THRESHOLD=0.7  DAFFODILL_FIELD_TIME=2.0  IROI_FUNNEL_POST_SLEEP=0.3
 Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTERVAL=0.12
 ENTRY_SKILL_WAIT=1.6  CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
 SOUND_REACTION_DAFFODILL_TIME=1.0  SOUND_IMMEDIATE_SPAM_TIME=1.2  SCRIPT_TICK=0.05
+ACTION_LOG_PATH=logs/four_combo_actions.log
 ```
 
 ---
@@ -172,6 +180,7 @@ SOUND_REACTION_DAFFODILL_TIME=1.0  SOUND_IMMEDIATE_SPAM_TIME=1.2  SCRIPT_TICK=0.
 
 1. **`is_in_team()` 不能判断大招动画**：NTE 的 Q 特写期间血条斜杠不消失，`is_in_team()` 一直 True → `wait_until(not is_in_team)` 每次超时 2s。已彻底移除基于它的动画等待。
 2. **`check_combat()` 会触发重新索敌**：`_recover_or_end_combat` → `target_enemy` → `middle_click`，打断长按/输入（日志里频繁 `targeting enemy for 3s`）。紧输入序列用 `skip_sleep_checks(check_combat=True)` 跳过战斗检查，但**保留声音抢占**（不动 `sound_combat_context`）。
+   - **特写误判打断开局**：`BaseChar.click_skill()` 内部 `sleep` 会走 `sleep_check → check_combat`，而 `skip_sleep_checks` 覆盖不到它。大招特写期间战斗检测会短暂判脱战，`target_enemy` 空转 ~3s 后失败抛 `NotInCombatException`，导致 `_opener` 从早雾 Q 处中断并整段重跑（表现为“早雾 Q 接不上残虹双 Q，要等一会”）。修法：`_opener` / `_loop_once` 的紧输入序列用 `_suspend_combat_check()` 抑制 `check_combat`（覆写 `check_combat`，仅本任务生效），长循环 `_daffodill_until_cycle_full` 不抑制，仍靠 `while in_combat()` 检测脱战。
 3. **Q 会被入场技/切人动画吃掉**：Q 一律“连按到注册”（`_press_q_until_registered`），不要只按一次。
 4. **环合满切人触发入场技**：`_switch_to` 在切人**之前**读上一任 `is_cycle_full()`；不是切完再读残虹自己的。
 5. **切人确认延迟 ~0.3s**；`_switch_to_char` 会反复发切人键直到成功，天然满足“短时间无法切人就连点切人键”。
@@ -187,6 +196,11 @@ SOUND_REACTION_DAFFODILL_TIME=1.0  SOUND_IMMEDIATE_SPAM_TIME=1.2  SCRIPT_TICK=0.
 ## 7. 当前状态 / 未解决项 / 下一步
 
 **已实现**：1.1~1.7 的状态机全部落地；编译/lint/`tests.TestCombatPlanner`(94) 通过。
+
+**最近改动**：
+- 入战前预判：未入战且残虹在场时**只轮询检测金 E，不做任何键鼠操作**（长按由玩家自己预判操作），检测到即按 E、切达芙蒂尔、入战前自动放 Q；入战后再从切伊洛伊放 E 继续。`_opener` 会跳过入战前已放的达芙蒂尔 Q。
+- 新增独立轻量键鼠日志 `logs/four_combo_actions.log`（覆写输入方法记录真实操作 + phase 标记），用于复盘每次残虹二连的按键时序。
+- 修复开局/主循环被打断：`_opener` 与 `_loop_once` 的紧输入序列用 `_suspend_combat_check()` 抑制 `check_combat`，避免早雾 Q 特写期间战斗检测误判脱战、`target_enemy` 空转 3s 后打断流程重跑（表现为早雾 Q 接不上残虹双 Q，要等一会）。
 
 **实测已知问题（最近一轮日志结论）**：
 - `is_in_team` 动画判断失效 → 已修（移除）。
@@ -212,6 +226,12 @@ SOUND_REACTION_DAFFODILL_TIME=1.0  SOUND_IMMEDIATE_SPAM_TIME=1.2  SCRIPT_TICK=0.
 - 代理（装依赖用）：`http://127.0.0.1:7897`。
 - 启动：`start.bat`（自动请求管理员权限，跑 `.venv\Scripts\python.exe main.py`）。
 - 日志：`logs\ok-script.log`，每天午夜轮转 `ok-script.YYYY-MM-DD.log`，保留 7 天；`main_debug.py` 同文件、级别 DEBUG。
+- 连招键鼠日志：`logs\four_combo_actions.log`（仅本任务写入，追加不轮转）。每行格式
+  `HH:MM:SS.mmm +间隔s [phase] 操作`，例如 `[zankou_combo] mouse_down left`；
+  每次启动写一行 `==== session YYYY-MM-DD HH:MM:SS ====`。phase 取值：
+  `precombat_gold_e` / `precombat_daffodill_q` / `opener` / `loop` / `pad_until_q` /
+  `zankou_gold_e` / `zankou_enter` / `zankou_combo` / `zankou_double_q` /
+  `iroi_funnel` / `daffodill_window` / `sound_zankou`。该文件属本地生成物，不要提交。
 - 常用命令（仓库根目录）：
   ```powershell
   .\.venv\Scripts\python.exe -m py_compile src\tasks\trigger\FourCharComboTask.py

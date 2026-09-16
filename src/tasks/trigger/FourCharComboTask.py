@@ -1,4 +1,7 @@
+import os
+import threading
 import time
+from contextlib import contextmanager
 
 from ok import Logger, TriggerTask
 
@@ -43,6 +46,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     SOUND_IMMEDIATE_SPAM_TIME = 1.2
     SCRIPT_TICK = 0.05
 
+    ACTION_LOG_PATH = os.path.join("logs", "four_combo_actions.log")
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.default_config.update({"_enabled": False})
@@ -52,9 +57,15 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._last_run_state = None
         self._entry_skill_until = 0.0
         self._opener_gold_e_done = False
+        self._precombat_daffodill_q_done = False
         self._sound_counter_pending = False
         self._sound_counter_by_zankou = False
         self._in_sound_reaction = False
+        self._action_phase = ""
+        self._action_log_handle = None
+        self._action_log_last = 0.0
+        self._action_log_lock = threading.Lock()
+        self._suppress_combat_check = False
 
     # ---------------------------------------------------------------- chars
 
@@ -115,34 +126,153 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         finally:
             self.combat_end()
 
+    def enable(self):
+        self._reset_precombat()
+        super().enable()
+
+    def _reset_precombat(self):
+        self._opener_gold_e_done = False
+        self._precombat_daffodill_q_done = False
+        self._sound_counter_pending = False
+        self._action_phase = ""
+        self._suppress_combat_check = False
+
+    def check_combat(self):
+        """紧输入序列(开局)期间抑制战斗检测, 避免大招特写被误判脱战打断."""
+        if self._suppress_combat_check:
+            return
+        super().check_combat()
+
+    @contextmanager
+    def _suspend_combat_check(self):
+        old = self._suppress_combat_check
+        self._suppress_combat_check = True
+        try:
+            yield
+        finally:
+            self._suppress_combat_check = old
+
     def combat_end(self):
         super().combat_end()
-        self._opener_gold_e_done = False
+        self._reset_precombat()
 
     def _precombat_gold_e(self):
-        """入战检测之前, 残虹在场且检测到金 E 时, 直接按 E 并切达芙蒂尔."""
+        """入战前只轮询金 E(不做任何键鼠操作); 检测到金 E 才按 E 切达芙蒂尔并放 Q.
+
+        长按由玩家自己预判操作, 脚本不知道何时开始长按, 因此这里只做检测,
+        绝不主动 mouse_down / click / 切人。
+        """
         if self._opener_gold_e_done:
+            self._precombat_daffodill_q()
             return
         if len(self.chars) < 4 and not self.load_chars():
             return
-        zankou = self.zankou
-        if self.get_current_char(raise_exception=False) is not zankou:
+        if self.get_current_char(raise_exception=False) is not self.zankou:
             return
-        if not self.find_one(Labels.zankou_skill_gold):
+        box = self.find_one(Labels.zankou_skill_gold, threshold=0.0)
+        conf = box.confidence if box else 0.0
+        if conf < self.GOLD_THRESHOLD:
             return
-        logger.info("precombat gold E detected, press E and switch daffodill")
+        logger.info(f"precombat gold E detected, conf={conf:.3f}, press E and switch daffodill")
+        self._set_action_phase("precombat_gold_e")
         self._opener_gold_e_done = True
-        zankou.click_skill()
+        self.zankou.click_skill()
         self._switch_to(self.daffodill)
+        self._precombat_daffodill_q()
+
+    def _precombat_daffodill_q(self):
+        """入战前在达芙蒂尔身上等 Q(只检测), 可用即放, 不要求进入战斗."""
+        if self._precombat_daffodill_q_done:
+            return
+        daffodill = self.daffodill
+        if self.get_current_char(raise_exception=False) is not daffodill:
+            return
+        if not daffodill.ultimate_available():
+            return
+        self._set_action_phase("precombat_daffodill_q")
+        self._cast_q(daffodill)
+        self._precombat_daffodill_q_done = True
 
     def _log_run_state(self, state):
         if state != self._last_run_state:
             self._last_run_state = state
             logger.info(f"four char combo state: {state}")
 
+    # ----------------------------------------------------------- action log
+
+    def _action_log(self, text):
+        """把一次真实的键鼠操作写入独立轻量日志, 便于复盘连招按键时序."""
+        try:
+            now = time.time()
+            with self._action_log_lock:
+                if self._action_log_handle is None:
+                    os.makedirs(os.path.dirname(self.ACTION_LOG_PATH), exist_ok=True)
+                    self._action_log_handle = open(
+                        self.ACTION_LOG_PATH, "a", encoding="utf-8", buffering=1
+                    )
+                    self._action_log_handle.write(
+                        f"\n==== session {time.strftime('%Y-%m-%d %H:%M:%S')} ====\n"
+                    )
+                delta = now - self._action_log_last if self._action_log_last else 0.0
+                self._action_log_last = now
+                stamp = time.strftime("%H:%M:%S", time.localtime(now))
+                millis = int((now % 1) * 1000)
+                phase = self._action_phase or "-"
+                self._action_log_handle.write(
+                    f"{stamp}.{millis:03d} +{delta:6.3f}s [{phase}] {text}\n"
+                )
+        except Exception as e:
+            logger.error("four combo action log write failed", e)
+
+    def _set_action_phase(self, phase):
+        if phase == self._action_phase:
+            return
+        self._action_phase = phase
+        self._action_log(f"==== {phase} ====")
+
+    def _close_action_log(self):
+        handle = self._action_log_handle
+        self._action_log_handle = None
+        if handle is not None:
+            try:
+                handle.close()
+            except Exception:
+                pass
+
+    # -------------------------------------------------- input log wrappers
+
+    def click(self, *args, **kwargs):
+        key = kwargs.get("key", "left")
+        name = kwargs.get("name")
+        self._action_log(f"click {key}" + (f" ({name})" if name else ""))
+        return super().click(*args, **kwargs)
+
+    def send_key(self, key, *args, **kwargs):
+        self._action_log(f"key {key}")
+        return super().send_key(key, *args, **kwargs)
+
+    def send_key_down(self, key, *args, **kwargs):
+        self._action_log(f"key_down {key}")
+        return super().send_key_down(key, *args, **kwargs)
+
+    def send_key_up(self, key, *args, **kwargs):
+        self._action_log(f"key_up {key}")
+        return super().send_key_up(key, *args, **kwargs)
+
+    def mouse_down(self, *args, **kwargs):
+        self._action_log(f"mouse_down {kwargs.get('key', 'left')}")
+        return super().mouse_down(*args, **kwargs)
+
+    def mouse_up(self, *args, **kwargs):
+        self._action_log(f"mouse_up {kwargs.get('key', 'left')}")
+        return super().mouse_up(*args, **kwargs)
+
+    def on_destroy(self):
+        self._close_action_log()
+        super().on_destroy()
+
     def _run_rotation(self):
         logger.info(f"four char combo rotation start, chars={[c.ufn_name for c in self.chars]}")
-        self._ensure_current(self.zankou)
         self._opener()
         while self.in_combat():
             self._loop_once()
@@ -151,51 +281,56 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
 
     def _opener(self):
         logger.info("four char combo opener start")
-        if not self._opener_gold_e_done:
-            self._ensure_current(self.zankou)
-            self._zankou_gold_e()
+        self._set_action_phase("opener")
+        with self._suspend_combat_check():
+            if not self._opener_gold_e_done:
+                self._ensure_current(self.zankou)
+                self._zankou_gold_e()
 
-        self._switch_to(self.daffodill)
-        self._cast_q(self.daffodill)
+            self._switch_to(self.daffodill)
+            if not self._precombat_daffodill_q_done:
+                self._cast_q(self.daffodill)
 
-        self._switch_to(self.iroi)
-        self.iroi.click_skill()
+            self._switch_to(self.iroi)
+            self.iroi.click_skill()
 
-        self._switch_to(self.sakiri)
-        self._cast_q(self.sakiri)
-        self.sakiri.click_skill()
+            self._switch_to(self.sakiri)
+            self._cast_q(self.sakiri)
+            self.sakiri.click_skill()
 
-        self._switch_to(self.zankou)
-        self._zankou_double_q()
-        self._zankou_combo()
-        self._switch_to(self.iroi)
+            self._switch_to(self.zankou)
+            self._zankou_double_q()
+            self._zankou_combo()
+            self._switch_to(self.iroi)
 
-        self._iroi_q_funnel()
+            self._iroi_q_funnel()
 
-        target = self._zankou_combo_switch(self.daffodill)
+            target = self._zankou_combo_switch(self.daffodill)
         if target is self.daffodill:
             self._daffodill_until_cycle_full()
 
     # ------------------------------------------------------------ main loop
 
     def _loop_once(self):
-        self._maybe_handle_sound_counter()
+        self._set_action_phase("loop")
+        with self._suspend_combat_check():
+            self._maybe_handle_sound_counter()
 
-        iroi = self.iroi
-        self._switch_to(iroi)
-        if not iroi.ultimate_available() and not self._pad_until_q(iroi):
-            return
-        self._iroi_q_funnel()
+            iroi = self.iroi
+            self._switch_to(iroi)
+            if not iroi.ultimate_available() and not self._pad_until_q(iroi):
+                return
+            self._iroi_q_funnel()
 
-        sakiri = self.sakiri
-        self._switch_to(sakiri)
-        if not sakiri.ultimate_available() and not self._pad_until_q(sakiri):
-            return
-        self._cast_q(sakiri)
-        sakiri.click_skill()
+            sakiri = self.sakiri
+            self._switch_to(sakiri)
+            if not sakiri.ultimate_available() and not self._pad_until_q(sakiri):
+                return
+            self._cast_q(sakiri)
+            sakiri.click_skill()
 
-        self._switch_to(self.zankou)
-        target = self._zankou_fixed_step()
+            self._switch_to(self.zankou)
+            target = self._zankou_fixed_step()
         if target is self.iroi:
             return
         self._daffodill_until_cycle_full()
@@ -218,6 +353,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 return
 
     def _daffodill_window(self, daffodill):
+        self._set_action_phase("daffodill_window")
         start = time.time()
         if daffodill.skill_available():
             daffodill.click_skill()
@@ -237,6 +373,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
 
     def _pad_until_q(self, target):
         """点一次左键 -> 切残虹二连 -> 切回, 直到 target Q 可放."""
+        self._set_action_phase("pad_until_q")
         while self.in_combat() and not target.ultimate_available():
             self._maybe_handle_sound_counter()
             self.click()
@@ -247,16 +384,19 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     # ------------------------------------------------------------- zankou
 
     def _zankou_gold_e(self):
+        self._set_action_phase("zankou_gold_e")
         self._hold_until_gold()
         self.zankou.click_skill()
 
     def _zankou_combo(self):
         """残虹二连: 长按轮询金E -> 松开 -> 单击左键 -> 等 0.05s."""
+        self._set_action_phase("zankou_combo")
         self._hold_until_gold()
         self.click()
         self.sleep(self.COMBO_CLICK_GAP)
 
     def _zankou_combo_switch(self, default_target):
+        self._set_action_phase("zankou_enter")
         self._switch_to(self.zankou)
         self._zankou_combo()
         if self.is_cycle_full():
@@ -297,6 +437,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             logger.warning(f"zankou gold E not detected, best conf={best_conf:.3f}")
 
     def _zankou_double_q(self):
+        self._set_action_phase("zankou_double_q")
         zankou = self.zankou
         if not self._press_q_ready(zankou):
             return
@@ -361,6 +502,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         return False
 
     def _iroi_q_funnel(self):
+        self._set_action_phase("iroi_funnel")
         iroi = self.iroi
         if not self._press_q_ready(iroi):
             return
@@ -466,6 +608,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             self._in_sound_reaction = False
 
     def _sound_reaction_zankou(self):
+        self._set_action_phase("sound_zankou")
         self._switch_to(self.daffodill)
         daffodill = self.daffodill
         start = time.time()
