@@ -66,9 +66,9 @@
 
 ### 1.5 浮游炮（伊洛伊）
 
-点 Q → **等特写/动画结束**（`is_in_team`，对齐原版 `click_ultimate` 的 `_wait_action_animation`）→ 长按左键（**对齐原版 `Iroi._wait_ultimate_unfreeze`**：`mouse_down` 后等 `box_ultimate` 图标变化 / Q 不可用）→ 松手 → 睡 **0.3s** → **单击左键**。
+点 Q → **等特写结束**（信号 = **环合条由不可见变为可见**，`_wait_iroi_cutscene`：先等环合条消失=特写开始，再等环合条恢复=特写结束）→ 长按左键（**对齐原版 `Iroi._wait_ultimate_unfreeze`**：`mouse_down` 后等 `box_ultimate` 图标变化 / Q 不可用）→ 松手 → 睡 **0.3s** → **单击左键**。
 - 说明：`mouse_down`/等待逻辑沿用原版出招表（`iroi._wait_ultimate_unfreeze`）；结尾 `sleep 0.3s + 单击左键` 是本脚本规范额外要求的，不在原版里。
-- 实测手动节奏（`input_record`）：Q 后约 **2.9s** 才长按，长按约 **0.86s**，松手后约 **0.07s** 单击。当前用 `is_in_team` 等特写；若仍不够可改成显式等待。
+- 实测手动节奏（`input_record`）：Q 后约 **2.9s** 才长按，长按约 **0.86s**，松手后约 **0.07s** 单击。特写用环合条可见性判断（`_cycle_bar_white_pixels`，与 `is_cycle_full` 同款环形区域，`CYCLE_BAR_VISIBLE_MIN_PIXELS=20`）。
 
 ### 1.6 闪避反击反应
 
@@ -161,7 +161,8 @@ COMBO_RELEASE_GAP=0.06  COMBO_CLICK_GAP=0.05
 SKILL_REGISTER_TIMEOUT=2.0  DAFFODILL_SKILL_REGISTER_TIMEOUT=0.5
 GOLD_THRESHOLD=0.7  DAFFODILL_FIELD_TIME=1.5  PAD_FIELD_TIME=1.5  IROI_FUNNEL_POST_SLEEP=0.3
 Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTERVAL=0.12
-ENTRY_SKILL_WAIT=1.6  SUPPRESS_SWITCH_CLICK=True  IROI_FUNNEL_ANIMATION_TIMEOUT=4.0
+ENTRY_SKILL_WAIT=1.6  SUPPRESS_SWITCH_CLICK=True  CYCLE_BAR_VISIBLE_MIN_PIXELS=20
+IROI_FUNNEL_CUTSCENE_START_TIMEOUT=1.0  IROI_FUNNEL_ANIMATION_TIMEOUT=4.0
 CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
 SOUND_REACTION_DAFFODILL_TIME=1.0  SOUND_IMMEDIATE_SPAM_TIME=1.2  SCRIPT_TICK=0.05
 ACTION_LOG_PATH=logs/four_combo_actions.log
@@ -178,6 +179,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 | 队友 Q 是否就绪 | `char.ultimate_available()`（非当前走 `task.ultimate_available(index)` 模板） | 模板匹配经常 `conf=0.0`，不稳 |
 | 残虹金 E | `find_one(Labels.zankou_skill_gold)` | 无专用滤镜，原图颜色模板匹配，阈值 0.7 常漏检；已加 `conf=` 日志 |
 | 残虹环合满 | `is_cycle_full()`（2560x1440 下 `944,1316` 环形白像素密度） | 读的是**当前角色**；必须在切人**之前**读上一任 |
+| 特写是否结束 | 环合条环形白像素 `_cycle_bar_white_pixels()`（同款 `944,1316` 环形区域） | 特写期间环合条**不可见**（≈0），结束后恢复可见；用于伊洛伊浮游炮等特写结束判定 |
 | 入场技 | 切人前读上一任 `is_cycle_full()`，满则设 1.6s 入场窗口 | 入场技期间按 Q 无效 → 连按 Q |
 | 关卡剩余时间 | 无通用检测 | 读不到（`heist_timer` 只判断是否在劫案中） |
 | 战斗 UI 是否可见 | `is_in_team()`（`health_bar_slash`） | **NTE 大招特写期间一直 True**，不能判断动画 |
@@ -227,6 +229,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - 浮游炮 `_iroi_q_funnel` 长按/等待对齐原版出招表（复用 `iroi._wait_ultimate_unfreeze`，等 `box_ultimate` 图标变化），并补上原版的"等特写结束"（`is_in_team`，`IROI_FUNNEL_ANIMATION_TIMEOUT=4.0`）；结尾保留本脚本的 `sleep 0.3s + 单击左键`。
 - `_zankou_fixed_step` 增加 Q 状态诊断日志（`q_available` / `q_cd` / `lit` / `current`），用于排查主循环双 Q 未触发。
 - **移除切人二次验证**：`_verify_current_char` 轮询+重试在实测中反复误报（达芙蒂尔站场被拖长 ~3s/次），已回退到单次 `_switch_to_char`。
+- 浮游炮特写判定改用**环合条可见性**（`_wait_iroi_cutscene` / `_cycle_bar_white_pixels`）：先等环合条消失（特写开始）再等恢复（特写结束）才长按。
 
 **实测已知问题（最近一轮日志结论）**：
 - `is_in_team` 动画判断失效 → 已修（移除）。

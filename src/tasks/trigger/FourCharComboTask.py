@@ -4,6 +4,8 @@ import threading
 import time
 from contextlib import contextmanager
 
+import cv2
+import numpy as np
 from ok import Logger, TriggerTask
 
 from src.char.Daffodill import Daffodill
@@ -83,6 +85,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     Q_PRESS_INTERVAL = 0.12
     ENTRY_SKILL_WAIT = 1.6
     SUPPRESS_SWITCH_CLICK = True
+    CYCLE_BAR_VISIBLE_MIN_PIXELS = 20
+    IROI_FUNNEL_CUTSCENE_START_TIMEOUT = 1.0
     IROI_FUNNEL_ANIMATION_TIMEOUT = 4.0
     SKILL_REGISTER_TIMEOUT = 2.0
     DAFFODILL_SKILL_REGISTER_TIMEOUT = 0.5
@@ -616,17 +620,54 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             return
         was_lit = self._q_button_lit()
         self._press_q_until_registered(iroi, was_lit, self.Q_REGISTER_TIMEOUT)
-        start = time.time()
-        while not self.is_in_team() and time.time() - start < self.IROI_FUNNEL_ANIMATION_TIMEOUT:
-            self.sleep(0.05)
+        self._wait_iroi_cutscene()
         try:
-            iroi._wait_ultimate_unfreeze(start)
+            iroi._wait_ultimate_unfreeze(time.time())
         finally:
             if iroi._mouse_pressed:
                 self.mouse_up()
                 iroi._mouse_pressed = False
         self.sleep(self.IROI_FUNNEL_POST_SLEEP)
         self.click()
+
+    def _cycle_bar_white_pixels(self):
+        """环合条环形区域的白像素数; 特写期间环合条不可见(≈0)."""
+        img = self.box_of_screen_scaled(
+            2560, 1440, 944, 1316, width_original=66, height_original=66
+        ).crop_frame(self.frame)
+        h, w = img.shape[:2]
+        side = h
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        mask = np.zeros((h, w), dtype=np.uint8)
+        center = (w // 2, h // 2)
+        outer_r = side // 2
+        inner_r = int(outer_r * 0.85)
+        cv2.circle(mask, center, outer_r, 255, -1)
+        cv2.circle(mask, center, inner_r, 0, -1)
+        ring = cv2.bitwise_and(thresh, thresh, mask=mask)
+        return int(np.count_nonzero(ring))
+
+    def _is_cycle_bar_visible(self):
+        return self._cycle_bar_white_pixels() >= self.CYCLE_BAR_VISIBLE_MIN_PIXELS
+
+    def _wait_iroi_cutscene(self):
+        """等伊洛伊 Q 特写: 先等环合条消失(特写开始), 再等环合条恢复(特写结束)."""
+        start = time.time()
+        while (
+            self._is_cycle_bar_visible()
+            and time.time() - start < self.IROI_FUNNEL_CUTSCENE_START_TIMEOUT
+        ):
+            self.sleep(0.05)
+        while (
+            not self._is_cycle_bar_visible()
+            and time.time() - start < self.IROI_FUNNEL_ANIMATION_TIMEOUT
+        ):
+            self.sleep(0.05)
+        logger.info(
+            f"iroi funnel cutscene wait {time.time() - start:.2f}s, "
+            f"cycle_bar_pixels={self._cycle_bar_white_pixels()}"
+        )
 
     def _wait_controllable(self, char, was_lit):
         """可控信号: 冷却数字开始跳 或 Q 按钮由亮变灭."""
