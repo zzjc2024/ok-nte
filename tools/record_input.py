@@ -70,6 +70,11 @@ GAME_HWND_CLASS = "UnrealWindow"
 GAME_CAPTURE_RENDER_FULL = True  # 对应 app 的 capture_method "BitBlt_RenderFull"
 GAME_WINDOW_RETRY_INTERVAL = 2.0
 
+# E 状态日志: 状态变化 + 每秒一条采样(不受"是否正在记录键鼠"影响), 用于事后校准阈值
+SKILL_LOG_PATH = os.path.join(LOG_DIR, "skill_state.log")
+SKILL_LOG_INTERVAL = 1.0
+SKILL_LOG_MAX_BYTES = 5 * 1024 * 1024
+
 _MODIFIERS = {
     "ctrl", "ctrl_l", "ctrl_r",
     "shift", "shift_l", "shift_r",
@@ -295,13 +300,23 @@ class SkillMonitor:
     残虹不在场/没有图标, 不是真的白 E。
     """
 
-    def __init__(self, coco_json, features, threshold, interval, on_event, on_state=None):
+    def __init__(
+        self,
+        coco_json,
+        features,
+        threshold,
+        interval,
+        on_event,
+        on_state=None,
+        log_path=SKILL_LOG_PATH,
+    ):
         self.coco_json = coco_json
         self.features = tuple(features)
         self.threshold = threshold
         self.interval = interval
         self.on_event = on_event
         self.on_state = on_state
+        self.log_path = log_path
         self.state = None
         self.scores = {}
         self.white_ratio = 0.0
@@ -311,6 +326,7 @@ class SkillMonitor:
         self._thread = None
         self._feature_set = None
         self._capture = GameCapture()
+        self._log = None
 
     def start(self):
         if self._started:
@@ -322,6 +338,47 @@ class SkillMonitor:
     def stop(self):
         self._started = False
         self._capture.close()
+
+    def _open_log(self):
+        try:
+            os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
+            if (
+                os.path.exists(self.log_path)
+                and os.path.getsize(self.log_path) > SKILL_LOG_MAX_BYTES
+            ):
+                os.replace(self.log_path, self.log_path + ".old")
+            self._log = open(self.log_path, "a", encoding="utf-8")
+            width, height = self._capture.size
+            self._write_log(
+                f"==== skill state log {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
+                f"window {width}x{height} hwnd={self._capture.hwnd} "
+                f"threshold={self.threshold} interval={self.interval} ===="
+            )
+            print(f"[record] skill state log -> {self.log_path}")
+        except Exception as error:
+            print(f"[record] skill log open failed: {error}")
+            self._log = None
+
+    def _write_log(self, text):
+        if self._log is None:
+            return
+        try:
+            now = time.time()
+            stamp = datetime.fromtimestamp(now).strftime("%H:%M:%S")
+            millis = int((now % 1) * 1000)
+            self._log.write(f"{stamp}.{millis:03d} {text}\n")
+            self._log.flush()
+        except Exception as error:
+            print(f"[record] skill log write failed: {error}")
+
+    def _close_log(self):
+        if self._log is None:
+            return
+        try:
+            self._log.close()
+        except Exception as error:
+            print(f"[record] skill log close failed: {error}")
+        self._log = None
 
     def _run(self):
         try:
@@ -368,15 +425,23 @@ class SkillMonitor:
             f"[record] skill monitor listening for E state @ {self.interval}s "
             f"window {width}x{height} hwnd={self._capture.hwnd}"
         )
+        self._open_log()
+        self._write_log(f"skill E state={state} {self.detail()}")
         last_beat = time.time()
+        last_log = last_beat
         while self._started:
             start = time.time()
             try:
                 state, scores = self._poll()
             except Exception as error:
-                self.status = f"读取失败({error.__class__.__name__})"
+                # 游戏窗口可能被关掉/重开: 重新找一次, 找不到就等下一轮
                 print(f"[record] skill poll failed: {error}")
-                time.sleep(0.5)
+                if self._capture.open() is None:
+                    self.status = "找不到游戏窗口"
+                else:
+                    width, height = self._capture.size
+                    self.status = f"监听中 {width}x{height}"
+                time.sleep(GAME_WINDOW_RETRY_INTERVAL)
                 continue
             self.scores = scores
             if state != self.state:
@@ -384,13 +449,19 @@ class SkillMonitor:
                 self.state = state
                 self.event_count += 1
                 print(f"[record] skill E {previous} -> {state} {self.detail()}")
+                self._write_log(f"skill E {previous} -> {state} {self.detail()}")
                 self.on_event(previous, state, scores, self.white_ratio)
             if self.on_state is not None:
                 self.on_state(state, scores)
             if time.time() - last_beat >= SKILL_HEARTBEAT_INTERVAL:
                 last_beat = time.time()
                 print(f"[record] skill E state={state} {self.detail()}")
+            if time.time() - last_log >= SKILL_LOG_INTERVAL:
+                last_log = time.time()
+                self._write_log(f"skill E state={state} {self.detail()}")
             time.sleep(max(0.0, self.interval - (time.time() - start)))
+        self._write_log(f"skill E monitor stopped state={self.state} {self.detail()}")
+        self._close_log()
 
     def _poll(self):
         frame = self._capture.frame()
