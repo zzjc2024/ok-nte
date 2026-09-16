@@ -42,14 +42,18 @@ class SoundListener:
         counter_attack_sample_path: str,
         threshold: float = 0.13,
         counter_attack_threshold: float = 0.12,
+        dodge_success_sample_path: str = "",
+        dodge_success_threshold: float = 0.3,
         expansion_ratio: float = 1.0,
         is_allow_successive_trigger: bool = False,
         process_name: str = default_process_name,
     ):
         self.sample_path = sample_path
         self.counter_attack_sample_path = counter_attack_sample_path
+        self.dodge_success_sample_path = dodge_success_sample_path
         self.threshold = threshold
         self.counter_attack_threshold = counter_attack_threshold
+        self.dodge_success_threshold = dodge_success_threshold
         self.expansion_ratio = expansion_ratio
         self.is_allow_successive_trigger = is_allow_successive_trigger
         self.process_name = process_name
@@ -64,11 +68,13 @@ class SoundListener:
 
         self._sample_waveform = None
         self._counter_sample_waveform = None
+        self._dodge_success_sample_waveform = None
         self._b = None
         self._a = None
 
         self.on_dodge_triggered = None
         self.on_counter_triggered = None
+        self.on_dodge_success_triggered = None
         self._capture: Optional[AudioCaptureSource] = None
         self._log_gate = LogGate(logger)
 
@@ -94,12 +100,17 @@ class SoundListener:
                 self._counter_sample_waveform = self._normalize_waveform(
                     self._load_and_cache(self.counter_attack_sample_path)
                 )
+            if self.dodge_success_sample_path:
+                self._dodge_success_sample_waveform = self._normalize_waveform(
+                    self._load_and_cache(self.dodge_success_sample_path)
+                )
 
             logger.info(f"Sound samples loaded: {self.used_sr}Hz")
         except Exception as e:
             message = (
                 "Failed to load sound samples: "
-                f"dodge={self.sample_path}, counter={self.counter_attack_sample_path}: {e}"
+                f"dodge={self.sample_path}, counter={self.counter_attack_sample_path}, "
+                f"dodge_success={self.dodge_success_sample_path}: {e}"
             )
             logger.error(message)
             raise RuntimeError(message) from e
@@ -317,24 +328,33 @@ class SoundListener:
                     norm_window,
                     self._counter_sample_waveform,
                 )
+            dodge_success_score = 0.0
+            if self._dodge_success_sample_waveform is not None:
+                dodge_success_score = self._match_normalized(
+                    norm_window,
+                    self._dodge_success_sample_waveform,
+                )
 
-            self._check_triggers(dodge_score, counter_score)
+            self._check_triggers(dodge_score, counter_score, dodge_success_score)
 
             # self._draw_debug_visual(dodge_score, counter_score)
 
             self._log_gate.info(
                 "Audio monitoring - dodge_score: {:.4f} (threshold: {}), "
-                "counter_score: {:.4f} (threshold: {})".format(
+                "counter_score: {:.4f} (threshold: {}), "
+                "dodge_success_score: {:.4f} (threshold: {})".format(
                     dodge_score,
                     self.threshold,
                     counter_score,
                     self.counter_attack_threshold,
+                    dodge_success_score,
+                    self.dodge_success_threshold,
                 ),
                 interval=self.log_interval,
                 key="audio_monitoring",
             )
 
-    def _check_triggers(self, dodge_score, counter_score):
+    def _check_triggers(self, dodge_score, counter_score, dodge_success_score=0.0):
         now = time.time()
         if (
             not self.is_allow_successive_trigger
@@ -363,6 +383,18 @@ class SoundListener:
                     )
                 )
                 self.on_counter_triggered()
+                self._last_trigger_time = now
+                return
+
+        if dodge_success_score > 0 and dodge_success_score > self.dodge_success_threshold:
+            if self.on_dodge_success_triggered:
+                logger.info(
+                    "Dodge SUCCESS TRIGGERED! score: {:.4f}, threshold: {}".format(
+                        dodge_success_score,
+                        self.dodge_success_threshold,
+                    )
+                )
+                self.on_dodge_success_triggered()
                 self._last_trigger_time = now
 
     def _draw_debug_visual(self, dodge_score, counter_score):

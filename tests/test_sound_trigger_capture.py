@@ -96,6 +96,39 @@ class SoundListenerTests(unittest.TestCase):
                 counter_attack_sample_path="",
             )
 
+    def test_missing_dodge_success_sample_fails_fast(self):
+        from src.sound_trigger.SoundListener import SoundListener
+
+        with self.assertRaises(RuntimeError):
+            SoundListener(
+                sample_path="assets/sounds/dodge.wav",
+                counter_attack_sample_path="",
+                dodge_success_sample_path="assets/sounds/__missing_success__.wav",
+            )
+
+    def test_dodge_success_trigger_uses_its_own_threshold(self):
+        from src.sound_trigger.SoundListener import SoundListener
+
+        class StubListener(SoundListener):
+            def _load_samples(self):
+                pass
+
+        listener = StubListener(
+            sample_path="",
+            counter_attack_sample_path="",
+            dodge_success_sample_path="",
+            dodge_success_threshold=0.3,
+            is_allow_successive_trigger=True,
+        )
+        fired = []
+        listener.on_dodge_success_triggered = lambda: fired.append(True)
+
+        listener._check_triggers(0.0, 0.0, 0.2)
+        self.assertEqual(fired, [])
+
+        listener._check_triggers(0.0, 0.0, 0.31)
+        self.assertEqual(len(fired), 1)
+
     def test_listener_restarts_after_loop_error(self):
         from src.sound_trigger.SoundListener import SoundListener
 

@@ -902,17 +902,35 @@ class BaseCombatTask(CharElementUIMixin, CombatCheck):
         if not self.sleep_check_skip.check_combat:
             self.check_combat()
 
-    def _apply_sound_config(self, dodge_action=ACTION_UNSET, counter_action=ACTION_UNSET):
+    def _apply_sound_config(
+        self,
+        dodge_action=ACTION_UNSET,
+        counter_action=ACTION_UNSET,
+        dodge_success_action=ACTION_UNSET,
+    ):
         sound_context = SoundCombatContext()
         if self.sound_config:
             enable = self.sound_config.get("Enable Sound Trigger", True)
             dodge_all_attacks = self.sound_config.get("Dodge All Attacks", True)
             dodge_thresh = self.sound_config.get("Dodge Threshold", 0.13)
             counter_thresh = self.sound_config.get("Counter Attack Threshold", 0.12)
+            dodge_success_thresh = self.sound_config.get("Dodge Success Threshold", 0.3)
             dodge_thresh = np.clip(dodge_thresh, 0.0, 1.0)
             counter_thresh = np.clip(counter_thresh, 0.0, 1.0)
-            sound_context.update_config(enable, dodge_all_attacks, dodge_thresh, counter_thresh)
-        sound_context.update_task(self, dodge_action=dodge_action, counter_action=counter_action)
+            dodge_success_thresh = np.clip(dodge_success_thresh, 0.0, 1.0)
+            sound_context.update_config(
+                enable,
+                dodge_all_attacks,
+                dodge_thresh,
+                counter_thresh,
+                dodge_success_thresh,
+            )
+        sound_context.update_task(
+            self,
+            dodge_action=dodge_action,
+            counter_action=counter_action,
+            dodge_success_action=dodge_success_action,
+        )
 
     def check_combat(self):
         """检查当前是否处于战斗状态, 如果不是则抛出异常。"""

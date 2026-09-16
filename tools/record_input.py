@@ -27,7 +27,8 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 DODGE_SUCCESS_SAMPLE = os.path.join(BASE_DIR, "assets", "sounds", "dodge_success.wav")
-DODGE_SUCCESS_THRESHOLD = 0.45
+# Mirrors the app default for config option "Dodge Success Threshold".
+DODGE_SUCCESS_THRESHOLD = 0.3
 DEFAULT_GAME_EXE = "HTGame.exe"
 
 _MODIFIERS = {
@@ -111,9 +112,9 @@ class SoundMonitor:
         monitor = self
 
         class _ScoreListener(SoundListener):
-            def _check_triggers(self, dodge_score, counter_score):
+            def _check_triggers(self, dodge_score, counter_score, dodge_success_score=0.0):
                 monitor._handle_score(dodge_score)
-                super()._check_triggers(dodge_score, counter_score)
+                super()._check_triggers(dodge_score, counter_score, dodge_success_score)
 
         try:
             listener = _ScoreListener(

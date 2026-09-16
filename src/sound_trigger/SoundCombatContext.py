@@ -56,6 +56,7 @@ class SoundCombatContext:
         self._pending_task = None
         self._dodge_action: Optional[Callable] = None
         self._counter_action: Optional[Callable] = None
+        self._dodge_success_action: Optional[Callable] = None
         self._pending_config = None
         self._pending_action = None
 
@@ -118,11 +119,14 @@ class SoundCombatContext:
         enable_sound_trigger: bool = True,
         sample_path: str = "./assets/sounds/dodge.wav",
         counter_attack_sample_path: str = "./assets/sounds/counter.wav",
+        dodge_success_sample_path: str = "./assets/sounds/dodge_success.wav",
         dodge_all_attacks: bool = True,
         threshold: float = 0.13,
         counter_attack_threshold: float = 0.12,
+        dodge_success_threshold: float = 0.3,
         dodge_action: Optional[Callable] = None,
         counter_action: Optional[Callable] = None,
+        dodge_success_action: Optional[Callable] = None,
         **kwargs,
     ):
         with self._context_lock:
@@ -130,9 +134,13 @@ class SoundCombatContext:
                 return
 
             if self._pending_config is not None:
-                enable_sound_trigger, dodge_all_attacks, threshold, counter_attack_threshold = (
-                    self._pending_config
-                )
+                (
+                    enable_sound_trigger,
+                    dodge_all_attacks,
+                    threshold,
+                    counter_attack_threshold,
+                    dodge_success_threshold,
+                ) = self._pending_config
 
             self._enable_sound_trigger = enable_sound_trigger
             self._dodge_all_attacks = dodge_all_attacks
@@ -140,20 +148,26 @@ class SoundCombatContext:
                 self._dodge_action = dodge_action
             if counter_action is not None:
                 self._counter_action = counter_action
+            if dodge_success_action is not None:
+                self._dodge_success_action = dodge_success_action
 
             if not (0.0 <= threshold <= 1.0):
                 raise ValueError("threshold must be between 0.0 and 1.0")
             if not (0.0 <= counter_attack_threshold <= 1.0):
                 raise ValueError("counter_attack_threshold must be between 0.0 and 1.0")
+            if not (0.0 <= dodge_success_threshold <= 1.0):
+                raise ValueError("dodge_success_threshold must be between 0.0 and 1.0")
 
             audio_process_name = _game_audio_process_name()
             self._config = {
                 "sample_path": sample_path,
                 "counter_attack_sample_path": counter_attack_sample_path,
+                "dodge_success_sample_path": dodge_success_sample_path,
                 "dodge_all_attacks": dodge_all_attacks,
                 "audio_process_name": audio_process_name,
                 "threshold": threshold,
                 "counter_attack_threshold": counter_attack_threshold,
+                "dodge_success_threshold": dodge_success_threshold,
             }
 
             from src.sound_trigger.SoundListener import SoundListener
@@ -162,6 +176,8 @@ class SoundCombatContext:
                 counter_attack_sample_path=counter_attack_sample_path,
                 threshold=threshold,
                 counter_attack_threshold=counter_attack_threshold,
+                dodge_success_sample_path=dodge_success_sample_path,
+                dodge_success_threshold=dodge_success_threshold,
                 process_name=audio_process_name,
             )
 
@@ -169,10 +185,12 @@ class SoundCombatContext:
                 task=self._pending_task if self._pending_task is not None else task,
                 dodge_action=self._dodge_action,
                 counter_action=self._counter_action,
+                dodge_success_action=self._dodge_success_action,
             )
 
             self._listener.on_dodge_triggered = self._on_dodge_triggered
             self._listener.on_counter_triggered = self._on_counter_triggered
+            self._listener.on_dodge_success_triggered = self._on_dodge_success_triggered
             self._listener.is_computation_required = self._is_computation_required
 
             self._is_active = True
@@ -253,6 +271,9 @@ class SoundCombatContext:
     def _on_counter_triggered(self):
         self._queue_action("dodge" if self._dodge_all_attacks else "counter")
 
+    def _on_dodge_success_triggered(self):
+        self._queue_action("dodge_success")
+
     def execute_pending_action(self, expected_action=ACTION_UNSET, expected_task=ACTION_UNSET):
         with self._context_lock:
             action = self._pending_action
@@ -281,6 +302,8 @@ class SoundCombatContext:
                 trigger.execute_dodge()
             elif action == "counter":
                 trigger.execute_counter_attack()
+            elif action == "dodge_success":
+                trigger.execute_dodge_success()
         except Exception as e:
             logger.error("Failed to execute sound action", e)
         finally:
@@ -291,6 +314,7 @@ class SoundCombatContext:
         task,
         dodge_action: Optional[Callable] | object = ACTION_UNSET,
         counter_action: Optional[Callable] | object = ACTION_UNSET,
+        dodge_success_action: Optional[Callable] | object = ACTION_UNSET,
     ):
         with self._context_lock:
             current_task = self._trigger.task if self._trigger else self._pending_task
@@ -302,21 +326,28 @@ class SoundCombatContext:
                 self.clear_priority()
                 self._dodge_action = None if dodge_action is ACTION_UNSET else dodge_action
                 self._counter_action = None if counter_action is ACTION_UNSET else counter_action
+                self._dodge_success_action = (
+                    None if dodge_success_action is ACTION_UNSET else dodge_success_action
+                )
             else:
                 if dodge_action is not ACTION_UNSET:
                     self._dodge_action = dodge_action
                 if counter_action is not ACTION_UNSET:
                     self._counter_action = counter_action
+                if dodge_success_action is not ACTION_UNSET:
+                    self._dodge_success_action = dodge_success_action
 
             if self._trigger:
                 self._trigger.task = task
                 self._trigger.set_actions(
                     dodge_action=self._dodge_action,
                     counter_action=self._counter_action,
+                    dodge_success_action=self._dodge_success_action,
                 )
             if task is None:
                 self._dodge_action = None
                 self._counter_action = None
+                self._dodge_success_action = None
                 self._pending_action = None
                 self.clear_priority()
 
@@ -328,6 +359,7 @@ class SoundCombatContext:
             self._pending_task = None
             self._dodge_action = None
             self._counter_action = None
+            self._dodge_success_action = None
             if self._trigger:
                 self._trigger.task = None
                 self._trigger.set_actions()
@@ -346,14 +378,22 @@ class SoundCombatContext:
         dodge_all_attacks: bool,
         dodge_threshold: float,
         counter_threshold: float,
+        dodge_success_threshold: float = 0.3,
     ):
         with self._context_lock:
-            self._pending_config = (enable, dodge_all_attacks, dodge_threshold, counter_threshold)
+            self._pending_config = (
+                enable,
+                dodge_all_attacks,
+                dodge_threshold,
+                counter_threshold,
+                dodge_success_threshold,
+            )
             self._enable_sound_trigger = enable
             self._dodge_all_attacks = dodge_all_attacks
             if self._listener:
                 self._listener.threshold = dodge_threshold
                 self._listener.counter_attack_threshold = counter_threshold
+                self._listener.dodge_success_threshold = dodge_success_threshold
 
     def _is_computation_required(self) -> bool:
         if not self._enable_sound_trigger:
@@ -400,6 +440,7 @@ class SoundCombatContext:
             self._pending_task = None
             self._dodge_action = None
             self._counter_action = None
+            self._dodge_success_action = None
             self._pending_config = None
             self._pending_action = None
             logger.info("SoundCombatContext shutdown complete")

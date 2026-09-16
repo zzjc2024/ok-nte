@@ -56,14 +56,18 @@
 点 Q → `_wait_iroi_cutscene()` 等脱离大招动画（`is_in_team` 恢复）→ 复用**原版** `iroi._wait_ultimate_unfreeze`（内部 `mouse_down` 长按，等待信号 = `box_ultimate` 图标变化 / Q 不可用）→ `mouse_up` → `sleep IROI_FUNNEL_POST_SLEEP=0.3s` → **单击左键**。
 - 结尾 `sleep 0.3s + 单击左键` 是本脚本额外要求，原版没有。
 
-### 1.6 闪避反击反应
+### 1.6 声音触发：闪避 与 闪避成功反击
 
-- 闪避动作 = `d`+`lshift` **+ 补一次左键**（反击）。
-- 触发后第一时间**连点左键 + 连点切人键**（切人短时间可能被拒）。
-- 之后：
-  - **非残虹**触发 → 立即切残虹二连；
-  - **残虹**触发 → 切达芙蒂尔，Q/E 能放就放，不能就连点左键，**1s 后**切回残虹；
-  - **垫刀期间例外**：若正在残虹与某角色（早雾/伊洛伊）垫刀互切（`_pad_target` 非空），残虹触发时切人目标改为**该垫刀对象**（连点的切人键与切入角色都跟它走），避免跑偏到达芙蒂尔。
+两条音效各司其职，**不再是"听到警报就反击"**：
+
+- **攻击警报音**（`dodge.wav` / `counter.wav`）→ 只按闪避（`d`+`lshift`），不做反击。
+- **闪避成功音**（`dodge_success.wav`，阈值 = 配置项 `Dodge Success Threshold`，默认 **0.3**）→ 触发反击连招：
+  - **当前是残虹**：**点按左键 0.08s → 等 0.18s → 残虹二连**（长按仍按到金 E，`_hold_until_gold`）。实测手动中位：点按后 0.27s 起长按、长按 1.09s、短按 0.10s（取偏低值是为了抢时间）。
+  - **非残虹**：保持原逻辑 —— 连点左键 + 连点切人键（切残虹）`SOUND_IMMEDIATE_SPAM_TIME=1.2s`，随后主循环 `_switch_to(zankou)` + 残虹二连。
+
+- **为什么不用警报音当"闪避成功"判据**：实测同一份录音里警报音检出 17 次、闪避成功音 15 次，时间对不上（警报普遍早 0.45~0.6s），且约 3 次闪避完全没有警报音。
+- 闪避成功音模板取自 `logs/15次闪避.wav` 的 `64.0~64.2s`（0.2s，正好等于 `sample_len`），离线验证 15/15、事件分 0.76~1.00、事件外背景 ≤0.21。
+- 注意：日志里的分数是**首次越过阈值的那个窗口**的分数（不是峰值），所以阈值 0.45 实测余量只有 0.006、会漏检，才降到 0.3。
 
 ### 1.7 环合 / 入场技
 
@@ -124,7 +128,9 @@
 | `_cast_q` / `_press_q_ready` / `_press_q_until_registered` / `_q_registered` | 单 Q：连按到注册 + 等可控 |
 | `_iroi_q_funnel` / `_wait_iroi_cutscene` | 浮游炮 / 等脱离大招动画 |
 | `_wait_controllable` / `_wait_cd_ticking` / `_wait_in_team` | 可控 / CD 跳 / 脱离动画 |
-| `_sound_dodge_action` / `_sound_counter_action` / `_sound_immediate_reaction` / `_maybe_handle_sound_counter` / `_sound_reaction_zankou` | 闪避反击与反应 |
+| `_sound_dodge_action` / `_sound_counter_action` | 听到攻击警报：只按闪避（反击已改由闪避成功音触发） |
+| `_sound_dodge_success_action` | 听到闪避成功音：残虹 → 点左键 0.08s + 等 0.18s + 二连；非残虹 → `_sound_immediate_reaction` |
+| `_sound_immediate_reaction` / `_maybe_handle_sound_counter` | 非残虹反击：连点左键 + 连点切人键，随后主循环切残虹打二连 |
 | `_switch_to` / `_ensure_current` | 切人：先 `_wait_in_team` 等脱离动画，再 `_confirm_switch` |
 | `_confirm_switch` | **自研切人确认**：重按切人键直到图像确认目标上场；不采信 `active health change`，不额外点击 |
 | `_action_log` / `_set_action_phase` / `_close_action_log` | 独立键鼠日志（见 7） |
@@ -141,7 +147,7 @@ ENTRY_SKILL_WAIT=1.6  SUPPRESS_SWITCH_CLICK=True  SWITCH_CONFIRM_TIMEOUT=3.0
 SKILL_REGISTER_TIMEOUT=2.0  DAFFODILL_SKILL_REGISTER_TIMEOUT=0.5
 CYCLE_BAR_VISIBLE_MIN_PIXELS=20  IROI_FUNNEL_ANIMATION_TIMEOUT=5.0
 CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
-SOUND_REACTION_DAFFODILL_TIME=1.0  SOUND_IMMEDIATE_SPAM_TIME=1.2  SCRIPT_TICK=0.05
+SOUND_IMMEDIATE_SPAM_TIME=1.2  SOUND_SUCCESS_CLICK_DOWN=0.08  SOUND_SUCCESS_WAIT=0.18  SCRIPT_TICK=0.05
 ACTION_LOG_PATH=logs/four_combo_actions.log
 ```
 
@@ -195,7 +201,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 `scene.in_combat()` / `set_in_combat()` / `set_not_in_combat()`、`scene.is_in_team(fun)` / `get_is_in_team_record()`、`scene.health_snapshot()` / `clear_health_snapshot()`、`scene.cd_refreshed`。
 
 ### 5.8 声音
-`SoundListener`（dodge_score / counter_score）、`SoundCombatContext`（dodge_action / counter_action 回调、抢占）。
+`SoundListener`（`dodge_score` / `counter_score` / `dodge_success_score`；模板 `assets/sounds/dodge.wav`、`counter.wav`、`dodge_success.wav`）、`SoundCombatContext`（`dodge_action` / `counter_action` / `dodge_success_action` 回调、抢占）、`DodgeCounterTrigger`（`execute_dodge` / `execute_counter_attack` / `execute_dodge_success`）。阈值在配置项 `Sound Trigger Config`：`Dodge Threshold` / `Counter Attack Threshold` / `Dodge Success Threshold`。
 
 ---
 
@@ -225,7 +231,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 
 ### 日志（排查优先读前两个）
 - **流程日志（首选）**：`logs/four_combo.log`。`_ensure_combo_log_handler()` 给 `ok` logger 挂带 `_ComboLogFilter` 的 FileHandler，只放行含 `FourCharComboTask` / `four_combo` / `four char combo` / `CombatCheck` / `Dodge` / `SoundCombatContext` / `SoundListener` 的行，内容干净。`__init__` 与每次 `run()` 确保 handler 存在。
-- **键鼠日志**：`logs/four_combo_actions.log`。格式 `HH:MM:SS.mmm +间隔s [phase] 操作`；每次启动写 `==== session YYYY-MM-DD HH:MM:SS ====`。phase 取值：`precombat_gold_e` / `precombat_daffodill_q` / `opener` / `loop` / `pad_until_q` / `zankou_gold_e` / `zankou_enter` / `zankou_combo` / `zankou_double_q` / `iroi_funnel` / `daffodill_window` / `sound_zankou`。本地生成物，不要提交。
+- **键鼠日志**：`logs/four_combo_actions.log`。格式 `HH:MM:SS.mmm +间隔s [phase] 操作`；每次启动写 `==== session YYYY-MM-DD HH:MM:SS ====`。phase 取值：`precombat_gold_e` / `precombat_daffodill_q` / `opener` / `loop` / `pad_until_q` / `zankou_gold_e` / `zankou_enter` / `zankou_combo` / `zankou_double_q` / `iroi_funnel` / `daffodill_window` / `sound_success`。本地生成物，不要提交。
 - 全量日志：`logs/ok-script.log`（每天午夜轮转、保留 7 天）。
 
 ### 环境
@@ -254,5 +260,5 @@ uv run --with ruff ruff check src\tasks\trigger\FourCharComboTask.py
 - 角色基类：`src/char/BaseChar.py`；战斗基类：`src/combat/BaseCombatTask.py`；当前角色检测：`src/utils/current_char_detector.py` + `src/tasks/mixin/CharUIMixin.py`。
 - 参考实现：`src/char/Hotori.py`（复杂协作）、`src/char/Iroi.py`（浮游炮 `_wait_ultimate_unfreeze`）、`src/char/Daffodill.py`、`src/char/Zankou.py`。
 - 手动键鼠录制工具：`tools/record_input.py` + `tools/record_input.cmd`（管理员启动，GUI 窗口；按钮开始/停止，热键 `F10` 开始 / `F12` 停止）。日志写 `logs/input_record_*.log`，格式与 `four_combo_actions.log` 一致，用于对齐手动与脚本时序。依赖 `pynput`（已在 `.venv`）。
-  - 该工具**同时监听"闪避成功音"**（模板 `assets/sounds/dodge_success.wav`，阈值 `DODGE_SUCCESS_THRESHOLD=0.45`，走 `SoundListener` 同一套 WASAPI 进程回环 + 匹配），命中时在事件流插入 `sound dodge_success score=...`。GUI 有勾选框开关和实时分数显示，用来测量"闪避成功后隔多久才长按/二连"。
+  - 该工具**同时监听"闪避成功音"**（模板 `assets/sounds/dodge_success.wav`，阈值 `DODGE_SUCCESS_THRESHOLD=0.3`，与程序配置项 `Dodge Success Threshold` 默认值一致；走 `SoundListener` 同一套 WASAPI 进程回环 + 匹配），命中时在事件流插入 `sound dodge_success score=...`。GUI 有勾选框开关和实时分数显示，用来测量"闪避成功后隔多久才长按/二连"。
 - 游戏音频录制工具：`tools/game_recorder_gui.py` + `tools/record_game_audio.cmd`（WASAPI 内录 loopback；按钮开始/停止，热键 `F11` 开始 / `F12` 停止），输出 `logs/game_audio_output.wav`，用于制作声音模板。依赖 `pyaudiowpatch` + `keyboard`，装在**仓库外的独立环境** `C:\tool\.venv-tools`，不碰项目 `.venv` 与全局 Python（建环境命令见启动脚本头部注释）。

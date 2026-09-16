@@ -95,6 +95,9 @@ class RuntimeServices:
             task=None,
             sample_path=get_path_relative_to_exe("assets", "sounds", "dodge.wav"),
             counter_attack_sample_path=get_path_relative_to_exe("assets", "sounds", "counter.wav"),
+            dodge_success_sample_path=get_path_relative_to_exe(
+                "assets", "sounds", "dodge_success.wav"
+            ),
         )
         if self._stop_event.is_set():
             context.shutdown()

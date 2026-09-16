@@ -21,24 +21,29 @@ class DodgeCounterTrigger:
         task,
         dodge_action: Optional[Callable] = None,
         counter_action: Optional[Callable] = None,
+        dodge_success_action: Optional[Callable] = None,
     ):
         self.task = task
-        self.set_actions(dodge_action, counter_action)
+        self.set_actions(dodge_action, counter_action, dodge_success_action)
 
         self._is_executing = False
         self._execute_lock = threading.Lock()
         self._last_dodge_time = 0.0
         self._last_counter_time = 0.0
+        self._last_dodge_success_time = 0.0
         self._min_dodge_interval = 0.3
         self._min_counter_interval = 1.0
+        self._min_dodge_success_interval = 0.3
 
     def set_actions(
         self,
         dodge_action: Optional[Callable] = None,
         counter_action: Optional[Callable] = None,
+        dodge_success_action: Optional[Callable] = None,
     ):
         self.dodge_action = dodge_action or self._default_dodge_action
         self.counter_action = counter_action or self._default_counter_action
+        self.dodge_success_action = dodge_success_action
 
     def execute_dodge(self):
         now = time.time()
@@ -78,6 +83,32 @@ class DodgeCounterTrigger:
             logger.info(f"Counter attack executed successfully at {now:.3f}")
         except Exception as e:
             logger.error("Counter execution error", e)
+        finally:
+            self._is_executing = False
+
+    def execute_dodge_success(self):
+        """Dodge success cue heard: run the configured counter-combo reaction."""
+        if self.dodge_success_action is None:
+            return
+        now = time.time()
+        if now - self._last_dodge_success_time < self._min_dodge_success_interval:
+            logger.debug(
+                f"Dodge success skipped, too soon: {now - self._last_dodge_success_time:.3f}s"
+            )
+            return
+
+        with self._execute_lock:
+            if self._is_executing:
+                return
+            self._is_executing = True
+
+        try:
+            logger.info("Executing dodge success reaction")
+            self.dodge_success_action()
+            self._last_dodge_success_time = now
+            logger.info(f"Dodge success reaction executed successfully at {now:.3f}")
+        except Exception as e:
+            logger.error("Dodge success reaction error", e)
         finally:
             self._is_executing = False
 

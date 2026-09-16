@@ -92,8 +92,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     DAFFODILL_SKILL_REGISTER_TIMEOUT = 0.5
     CONTROLLABLE_TIMEOUT = 10.0
     ZANKOU_Q_READY_WINDOW = 2.0
-    SOUND_REACTION_DAFFODILL_TIME = 1.0
     SOUND_IMMEDIATE_SPAM_TIME = 1.2
+    SOUND_SUCCESS_CLICK_DOWN = 0.08
+    SOUND_SUCCESS_WAIT = 0.18
     SCRIPT_TICK = 0.05
 
     ACTION_LOG_PATH = os.path.join("logs", "four_combo_actions.log")
@@ -109,7 +110,6 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._opener_gold_e_done = False
         self._precombat_daffodill_q_done = False
         self._sound_counter_pending = False
-        self._sound_counter_by_zankou = False
         self._in_sound_reaction = False
         self._pad_target = None
         self._action_phase = ""
@@ -154,6 +154,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._apply_sound_config(
             dodge_action=self._sound_dodge_action,
             counter_action=self._sound_counter_action,
+            dodge_success_action=self._sound_dodge_success_action,
         )
         logger.info(f"four char combo loaded, current index {current_index}")
         return True
@@ -758,6 +759,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     # --------------------------------------------------------- sound react
 
     def _sound_dodge_action(self):
+        """听到攻击警报: 只按闪避; 反击连招改由"闪避成功音"触发."""
         try:
             self.send_key_down("d")
             time.sleep(0.02)
@@ -768,14 +770,28 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             time.sleep(0.02)
         self.send_key("lshift")
         time.sleep(0.02)
-        self.click()
-        time.sleep(0.02)
-        self._sound_immediate_reaction()
 
     def _sound_counter_action(self):
+        """听到可反击警报: 只补一次左键; 反击连招改由"闪避成功音"触发."""
         self.click()
         time.sleep(0.02)
-        self._sound_immediate_reaction()
+
+    def _sound_dodge_success_action(self):
+        """听到"闪避成功音"后的反击.
+
+        残虹: 点按左键 -> 等 SOUND_SUCCESS_WAIT -> 残虹二连(长按+短按).
+        其他角色: 保持原逻辑(连点左键+连点切人键), 随后主循环切残虹打二连。
+        """
+        current = self.get_current_char(raise_exception=False)
+        with self.skip_sleep_checks() as skip:
+            skip.all = True
+            if current is not self.zankou:
+                self._sound_immediate_reaction()
+                return
+            self._set_action_phase("sound_success")
+            self.click(down_time=self.SOUND_SUCCESS_CLICK_DOWN)
+            time.sleep(self.SOUND_SUCCESS_WAIT)
+            self._zankou_combo()
 
     def _sound_immediate_reaction(self):
         """触发闪避反击后第一时间连点左键并连点切人键."""
@@ -792,7 +808,6 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             )
             self.click()
             time.sleep(0.06)
-        self._sound_counter_by_zankou = by_zankou
         self._sound_counter_pending = True
 
     def _maybe_handle_sound_counter(self):
@@ -801,33 +816,14 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._sound_counter_pending = False
         self._in_sound_reaction = True
         try:
-            if self._sound_counter_by_zankou:
-                self._sound_reaction_zankou()
-            else:
-                self._switch_to(self.zankou)
-                self._zankou_combo()
+            self._switch_to(self.zankou)
+            self._zankou_combo()
         except NotInCombatException:
             raise
         except Exception as e:
             logger.error("sound counter reaction error", e)
         finally:
             self._in_sound_reaction = False
-
-    def _sound_reaction_zankou(self):
-        """残虹触发声音反击: 切达芙蒂尔(垫刀时切垫刀对象), Q/E 能放就放, 之后切回残虹."""
-        self._set_action_phase("sound_zankou")
-        target = self._pad_target if self._pad_target is not None else self.daffodill
-        self._switch_to(target)
-        start = time.time()
-        while self.in_combat() and time.time() - start < self.SOUND_REACTION_DAFFODILL_TIME:
-            if target.ultimate_available():
-                self._cast_q(target)
-                break
-            if target.skill_available():
-                self._skill_until_registered(target, self.DAFFODILL_SKILL_REGISTER_TIMEOUT)
-            self.click()
-            self.sleep(0.1)
-        self._switch_to(self.zankou)
 
     # ---------------------------------------------------------------- switch
 
