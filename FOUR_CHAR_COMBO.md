@@ -62,7 +62,7 @@
 1. 切残虹后先等脱离切人/入场动画（`_wait_in_team`，避免把切人动画误计）；
 2. **一直连按 Q**（`send_ultimate_key` 每 ~0.12s，冷却中按键被游戏忽略）；
 3. 用**大招动画次数**确认两段：`is_in_team()` 由 True→False 记一次动画，数到 **2 次** 才停（第一段特写、第二段特写）；
-4. 再 `_wait_in_team` 等第二段动画结束。
+4. 再 `_wait_in_team` 等第二段动画结束，然后额外 `sleep(ZANKOU_COMBO_START_DELAY=1.5s)` 再让上层做二连（实测手动第二段 Q 后约 4.7s 才长按，脚本原先 ~2.9s 偏早）。
 - 依据：`BaseChar._wait_action_animation` 就是用 `is_in_team` 判断大招动画进入/脱离；日志证实特写期间 `is_in_team` 连续 False ~2s。
 
 ### 1.5 浮游炮（伊洛伊）
@@ -78,6 +78,7 @@
 - 之后：
   - **非残虹**触发 → 立即切残虹二连；
   - **残虹**触发 → 切达芙蒂尔，Q/E 能放就放，不能就连点左键普攻；**1 秒后**切回残虹继续循环。
+  - **垫刀期间例外**：若当前正处于残虹与某角色（早雾/伊洛伊）的垫刀互切（`_pad_target` 非空），残虹触发时切人目标改为**该垫刀对象**（`_sound_immediate_reaction` 连点的切人键、`_sound_reaction_zankou` 切入的角色都跟它走），避免跑偏到达芙蒂尔。
 
 ### 1.7 环合值规则
 
@@ -159,7 +160,7 @@
 
 ```
 COMBO_HOLD_MIN=0.7  COMBO_HOLD_MAX=2.0  COMBO_POLL_INTERVAL=0.05
-COMBO_RELEASE_GAP=0.06  COMBO_CLICK_GAP=0.05
+COMBO_RELEASE_GAP=0.06  COMBO_CLICK_GAP=0.05  ZANKOU_COMBO_START_DELAY=1.5
 SKILL_REGISTER_TIMEOUT=2.0  DAFFODILL_SKILL_REGISTER_TIMEOUT=0.5
 GOLD_THRESHOLD=0.7  DAFFODILL_FIELD_TIME=1.5  PAD_FIELD_TIME=1.5  IROI_FUNNEL_POST_SLEEP=0.3
 Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTERVAL=0.12
@@ -236,6 +237,8 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - 浮游炮特写判定改用 `is_in_team`（`_wait_iroi_cutscene`），环合条像素保留作对照采样。
 - **残虹双 Q 改为"连按 Q + 数大招动画次数"**：`is_in_team` True→False 记一次，数到 2 次停止（用户方案）。
 - **切人改为自研确认 `_confirm_switch`**：先等脱离动画，再重按切人键直到图像确认目标上场（不采信 `active health change`、不额外点击）；E 改为只在图标亮起时按，并加 `skill wait t=.. lit=.. cd=.. in_team=..` 采样日志。
+- **声音反击目标跟随垫刀对象**：`_pad_until_q` 记录 `_pad_target`；残虹触发闪避反击时切人目标改为该垫刀对象（早雾/伊洛伊），不再固定达芙蒂尔。
+- 残虹双 Q 后增加 `ZANKOU_COMBO_START_DELAY=1.5s` 再二连（实测手动节奏更晚，原长按偏早）。
 
 **实测已知问题（最近一轮日志结论）**：
 - `is_in_team` 动画判断失效 → 已修（移除）。

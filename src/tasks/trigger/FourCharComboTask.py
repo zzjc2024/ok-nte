@@ -75,6 +75,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     COMBO_POLL_INTERVAL = 0.05
     COMBO_RELEASE_GAP = 0.06
     COMBO_CLICK_GAP = 0.05
+    ZANKOU_COMBO_START_DELAY = 1.5
     GOLD_THRESHOLD = 0.7
     DAFFODILL_FIELD_TIME = 1.5
     PAD_FIELD_TIME = 1.5
@@ -111,6 +112,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._sound_counter_pending = False
         self._sound_counter_by_zankou = False
         self._in_sound_reaction = False
+        self._pad_target = None
         self._action_phase = ""
         self._action_log_handle = None
         self._action_log_last = 0.0
@@ -472,23 +474,30 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     # ------------------------------------------------------------ pad loops
 
     def _pad_until_q(self, target):
-        """在 target 身上打 PAD_FIELD_TIME 秒 -> 切残虹二连 -> 切回, 直到 target Q 可放."""
+        """在 target 身上打 PAD_FIELD_TIME 秒 -> 切残虹二连 -> 切回, 直到 target Q 可放.
+
+        期间记录 `_pad_target`, 供声音反击把切人目标对准当前垫刀对象。
+        """
         self._set_action_phase("pad_until_q")
-        while self.in_combat() and not target.ultimate_available():
-            start = time.time()
-            while (
-                self.in_combat()
-                and not target.ultimate_available()
-                and time.time() - start < self.PAD_FIELD_TIME
-            ):
-                self._maybe_handle_sound_counter()
-                self.click()
-                self.sleep(0.1)
-            if not self.in_combat() or target.ultimate_available():
-                break
-            if self._zankou_combo_switch(target) is not target:
-                return False
-        return self.in_combat() and target.ultimate_available()
+        self._pad_target = target
+        try:
+            while self.in_combat() and not target.ultimate_available():
+                start = time.time()
+                while (
+                    self.in_combat()
+                    and not target.ultimate_available()
+                    and time.time() - start < self.PAD_FIELD_TIME
+                ):
+                    self._maybe_handle_sound_counter()
+                    self.click()
+                    self.sleep(0.1)
+                if not self.in_combat() or target.ultimate_available():
+                    break
+                if self._zankou_combo_switch(target) is not target:
+                    return False
+            return self.in_combat() and target.ultimate_available()
+        finally:
+            self._pad_target = None
 
     # ------------------------------------------------------------- zankou
 
@@ -583,6 +592,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         else:
             logger.warning(f"zankou double q incomplete, animations={animations}")
         self._wait_in_team(timeout=self.CONTROLLABLE_TIMEOUT)
+        if self.ZANKOU_COMBO_START_DELAY > 0:
+            logger.info(f"zankou combo start delay {self.ZANKOU_COMBO_START_DELAY:.2f}s")
+            self.sleep(self.ZANKOU_COMBO_START_DELAY)
 
     def _wait_in_team(self, timeout=2.0):
         """等脱离大招动画(is_in_team 恢复)."""
@@ -772,7 +784,10 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         """触发闪避反击后第一时间连点左键并连点切人键."""
         current = self.get_current_char(raise_exception=False)
         by_zankou = current is self.zankou
-        target = self.daffodill if by_zankou else self.zankou
+        if by_zankou and self._pad_target is not None:
+            target = self._pad_target
+        else:
+            target = self.daffodill if by_zankou else self.zankou
         deadline = time.time() + self.SOUND_IMMEDIATE_SPAM_TIME
         while time.time() < deadline:
             self.send_key(
@@ -802,17 +817,17 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             self._in_sound_reaction = False
 
     def _sound_reaction_zankou(self):
-        """残虹触发声音反击: 切达芙蒂尔, Q/E 能放就放, SOUND_REACTION_DAFFODILL_TIME 后切回残虹."""
+        """残虹触发声音反击: 切达芙蒂尔(垫刀时切垫刀对象), Q/E 能放就放, 之后切回残虹."""
         self._set_action_phase("sound_zankou")
-        self._switch_to(self.daffodill)
-        daffodill = self.daffodill
+        target = self._pad_target if self._pad_target is not None else self.daffodill
+        self._switch_to(target)
         start = time.time()
         while self.in_combat() and time.time() - start < self.SOUND_REACTION_DAFFODILL_TIME:
-            if daffodill.ultimate_available():
-                self._cast_q(daffodill)
+            if target.ultimate_available():
+                self._cast_q(target)
                 break
-            if daffodill.skill_available():
-                self._skill_until_registered(daffodill, self.DAFFODILL_SKILL_REGISTER_TIMEOUT)
+            if target.skill_available():
+                self._skill_until_registered(target, self.DAFFODILL_SKILL_REGISTER_TIMEOUT)
             self.click()
             self.sleep(0.1)
         self._switch_to(self.zankou)
