@@ -49,12 +49,15 @@
 
 > **长按上限绝对不许回到 2s。** 金 E 在 ~0.67~0.8s 出现（手动实测长按 0.87~0.99s 是"看到变金后再松手"），到 0.9s 还没金就是异常。
 
-**长按没出金 E 时分流**（`_zankou_hold_with_recovery`）：
+**长按没出金 E 时分流**（`_zankou_hold_with_recovery`，顺序很重要）：
+
+1. **先重按**（最多 `COMBO_HOLD_RETRY_MAX=3` 次，每次之间 `COMBO_HOLD_REPRESS_GAP=0.1s`）：切人/入场动画期间按住不生效——实测切人确认后按下、攻击要到动画结束才出来，金 E 就落在 0.9s 上限之后（`logs/four_combo_combo_anomaly_20260916_183648.png` 里能看到那一刻 E 图标已经变金、角色正在打伤害，但 0.9s 上限刚好先到了）。动画结束后重新按下，~0.7s 就正常变金。
+2. 重按到头仍没出金，再看是否掉血：
 
 | 情况 | 判据 | 处理 |
 |---|---|---|
-| 掉血了 | 长按期间**多次采样**血条像素数，出现下降 | 大概率被打断 → `_dodge_until_triggered()`：连按 shift 直到听到**闪避动作音**（见 1.6），确认闪避真的触发后再重打长按（最多 `COMBO_DODGE_RETRY_MAX=3` 轮） |
-| 没掉血 | 全程没看到血条下降 | 可控状态下长按不出金 E 不可能 → `_raise_combo_anomaly()`：落盘现场 → `disable()` 停任务 → 抛 `ZankouComboAnomaly` |
+| 掉血了 | 长按期间**多次采样**血条像素数，出现下降 | 大概率被打断 → `_dodge_until_triggered()`：连按 shift 直到听到**闪避动作音**（见 1.6），确认闪避真的触发后重新从第 1 步开始（最多 `COMBO_DODGE_RETRY_MAX=3` 次闪避） |
+| 没掉血 | 全程没看到血条下降 | 可控状态下重按多次长按不出金 E 不可能 → `_raise_combo_anomaly()`：落盘现场 → `disable()` 停任务 → 抛 `ZankouComboAnomaly` |
 
 - 血条必须**连续采样**（`_health_pixels()` = 当前角色血条红条掩码的非零像素数），不能只取首尾两次：伊洛伊大招会在后台回血，只取两次会出现"采样→掉血→回血→采样"而看不到掉血。判据是"相对历史峰值的下降" `> max(HEALTH_DROP_MIN_PIXELS=4, peak*HEALTH_DROP_RATIO=0.02)`。
 - 一帧血条都没取到（`health_samples == 0`）时无法证明"没掉血"，按"被打断"走闪避重试，不抛异常。
@@ -158,7 +161,7 @@
 | `_pad_until_q` | 伊洛伊/早雾 Q 不可放时的垫刀；记录 `_pad_target` 供声音反击用 |
 | `_skill_until_registered` | 只在 E 图标亮时连按 E 到 E 进 CD 即返回（替代阻塞的 `click_skill`） |
 | `_zankou_gold_e` / `_zankou_combo` / `_hold_until_gold` | 开局金 E / 二连 / 长按轮询金 E（返回 `(HoldResult, damaged)`，期间多次采样血条） |
-| `_zankou_hold_with_recovery` | 长按 + 失败分流：掉血 → 闪避重试；没掉血 → 抛 `ZankouComboAnomaly` 停任务 |
+| `_zankou_hold_with_recovery` | 长按 + 失败分流：先重按 3 次；仍不行再按掉血分流（掉血 → 闪避重试；没掉血 → 抛 `ZankouComboAnomaly` 停任务） |
 | `_dodge_until_triggered` / `_press_dodge` | 连按 shift 直到听到闪避动作音（`DODGE_RETRY_TIMEOUT=3s`，超时抛异常） |
 | `_health_pixels` / `_health_drop_margin` / `_raise_combo_anomaly` | 血条红条像素数 / 掉血判据 / 落盘+停任务+抛异常 |
 | `_zankou_double_q` / `_press_q_through_animations` | 双 Q（连按 Q + 确认 enter1/exit1/enter2/exit2），之后交给 `_wait_double_q_recovery` |
@@ -182,7 +185,8 @@
 ```
 COMBO_HOLD_MIN=0.67  COMBO_HOLD_MAX=0.9  COMBO_POLL_INTERVAL=0.05
 COMBO_RELEASE_GAP=0.06  COMBO_CLICK_GAP=0.05  GOLD_THRESHOLD=0.7
-COMBO_DODGE_RETRY_MAX=3  HEALTH_DROP_RATIO=0.02  HEALTH_DROP_MIN_PIXELS=4
+COMBO_DODGE_RETRY_MAX=3  COMBO_HOLD_RETRY_MAX=3  COMBO_HOLD_REPRESS_GAP=0.1
+HEALTH_DROP_RATIO=0.02  HEALTH_DROP_MIN_PIXELS=4
 DODGE_RETRY_TIMEOUT=3.0  DODGE_RETRY_INTERVAL=0.15
 DAFFODILL_FIELD_TIME=1.5  PAD_FIELD_TIME=1.5  IROI_FUNNEL_POST_SLEEP=0.3
 Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTERVAL=0.12
@@ -305,7 +309,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
   - 看 logger 名是为了让这些模块自身的日志也能进来（否则形如 `Zankou skill registered` 这种不含关键词的正文会被漏掉）。
   - 排查"敌人死了但还卡在战斗状态"：搜 `four char combo combat state [tag]`，这行由 `_maybe_log_combat_state()` 每 `COMBAT_STATE_LOG_INTERVAL=2s` 打印一次，含 `in_combat / scene_cache / uncertain / miss / boss_flag / is_boss / lv / target / health_bar`，一眼看出是哪个信号把战斗状态按住了。
   - 异常/失败现场：`_dump_q_cd_state(tag)` 会把整帧 + 右下技能条裁剪写到 `logs/four_combo_<tag>_<时间>.png`，并在日志里打一行 `four combo q cd dump [tag] saved=... ocr=[名字@(x,y)...] cds={...} current=...`。tag 取值：`q_not_ready` / `combo_ready_timeout` / `combo_anomaly`。
-  - 金 E 长按结果：`zankou gold E detected, conf=...` / `zankou gold E not detected, best conf=... (hold=0.9s, health_samples=N, health_peak=P, damaged=True/False)`；分流日志：`zankou gold E missing but damaged, dodge then retry (i/3)` / `dodge retry: dodge motion heard, dodge triggered` / `dodge retry: perfect dodge heard, ...` / `four char combo anomaly: ...`。
+  - 金 E 长按结果：`zankou gold E detected, conf=...` / `zankou gold E not detected, best conf=... (hold=0.9s, health_samples=N, health_peak=P, damaged=True/False)`；分流日志：`zankou gold E missing, press again (i/3)` / `zankou gold E missing but damaged, dodge then retry (i/3)` / `dodge retry: dodge motion heard, dodge triggered` / `dodge retry: perfect dodge heard, ...` / `four char combo anomaly: ...`。
   - 声音：`Dodge MOTION TRIGGERED! score: ...`（闪避动作音命中）、`Audio monitoring - ... dodge_motion_score: ...`（每 20s 一次）。
   - `BaseCombatTask.ultimate_available()` 里的 `char:N, ult:..., conf:...` 已用 `run_with_interval(..., 1, action_name=f"ultimate_available_log_{index}")` 节流到**每角色 1 条/秒**。它原先每轮无条件打印，而 `Iroi._wait_ultimate_unfreeze` 在特写期间以 ~250 次/秒轮询它，会把日志刷爆。加日志时注意别在轮询热路径里直接 `log_info`。
 - **键鼠日志**：`logs/four_combo_actions.log`。格式 `HH:MM:SS.mmm +间隔s [phase] 操作`；每次启动写 `==== session YYYY-MM-DD HH:MM:SS ====`。phase 取值：`precombat_gold_e` / `precombat_daffodill_q` / `opener` / `loop` / `pad_until_q` / `zankou_gold_e` / `zankou_enter` / `zankou_combo` / `zankou_double_q` / `zankou_cycle_full` / `iroi_funnel` / `daffodill_window` / `sound_success` / `sound_success_interrupt`。本地生成物，不要提交。

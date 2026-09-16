@@ -99,6 +99,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     COMBO_RELEASE_GAP = 0.06
     COMBO_CLICK_GAP = 0.05
     COMBO_DODGE_RETRY_MAX = 3
+    COMBO_HOLD_RETRY_MAX = 3
+    COMBO_HOLD_REPRESS_GAP = 0.1
     HEALTH_DROP_RATIO = 0.02
     HEALTH_DROP_MIN_PIXELS = 4
     DODGE_RETRY_TIMEOUT = 3.0
@@ -669,29 +671,47 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         return False
 
     def _zankou_hold_with_recovery(self, interrupt_event=None):
-        """长按轮询金 E; 没出金 E 时按"是否掉血"分流处理, 返回最终结果.
+        """长按轮询金 E; 失败时先重按, 再按"是否掉血"分流, 返回最终结果.
 
-        - 掉血 = 大概率被打断 -> 连按 shift 直到闪避真的触发, 然后重打长按;
-        - 没掉血 = 状态异常 -> 抛异常停任务 (可控状态下长按不出金 E 不可能)。
+        - 一次长按没出金 E 会先**重按几次**: 切人/入场动画期间按住不生效 (实测按下的那一刻
+          还在切人动画里, 攻击要到动画结束才出来, 金 E 就落在 0.9s 上限之后), 动画结束后
+          重新按下才会正常在 ~0.7s 变金;
+        - 重按仍不出金: 掉血 = 大概率被打断 -> 连按 shift 直到闪避真的触发再重打;
+                       没掉血 = 状态异常 -> 抛异常停任务。
         """
-        for attempt in range(1, self.COMBO_DODGE_RETRY_MAX + 1):
-            result, damaged = self._hold_until_gold(interrupt_event=interrupt_event)
+        damaged = False
+        press = 0
+        dodges = 0
+        while True:
+            press += 1
+            result, press_damaged = self._hold_until_gold(interrupt_event=interrupt_event)
+            damaged = damaged or press_damaged
             if result is not HoldResult.NO_GOLD:
                 return result
-            if not damaged:
+            if damaged:
+                dodges += 1
+                if dodges > self.COMBO_DODGE_RETRY_MAX:
+                    self._raise_combo_anomaly(
+                        f"zankou gold E still missing after {self.COMBO_DODGE_RETRY_MAX} dodges"
+                    )
+                logger.warning(
+                    f"zankou gold E missing but damaged, dodge then retry "
+                    f"({dodges}/{self.COMBO_DODGE_RETRY_MAX})"
+                )
+                if not self._dodge_until_triggered():
+                    return HoldResult.HANDLED
+                damaged = False
+                press = 0
+                continue
+            if press >= self.COMBO_HOLD_RETRY_MAX:
                 self._raise_combo_anomaly(
-                    f"zankou gold E missing while not damaged (attempt {attempt}, "
-                    f"hold {self.COMBO_HOLD_MAX}s)"
+                    f"zankou gold E missing while not damaged after "
+                    f"{press} presses (hold {self.COMBO_HOLD_MAX}s each)"
                 )
             logger.warning(
-                f"zankou gold E missing but damaged, dodge then retry "
-                f"({attempt}/{self.COMBO_DODGE_RETRY_MAX})"
+                f"zankou gold E missing, press again ({press}/{self.COMBO_HOLD_RETRY_MAX})"
             )
-            if not self._dodge_until_triggered():
-                return HoldResult.HANDLED
-        self._raise_combo_anomaly(
-            f"zankou gold E still missing after {self.COMBO_DODGE_RETRY_MAX} dodge retries"
-        )
+            self.sleep(self.COMBO_HOLD_REPRESS_GAP)
 
     def _dodge_until_triggered(self):
         """连按闪避(shift)直到听到"闪避动作音", 确认闪避真的触发了.
