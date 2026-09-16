@@ -78,7 +78,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     SAKIRI_INDEX = 3
 
     COMBO_HOLD_MIN = 0.7
-    COMBO_HOLD_MAX = 2.0
+    COMBO_HOLD_MAX = 0.8
     COMBO_POLL_INTERVAL = 0.05
     COMBO_RELEASE_GAP = 0.06
     COMBO_CLICK_GAP = 0.05
