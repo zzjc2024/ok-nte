@@ -80,6 +80,8 @@ GAME_WINDOW_RETRY_INTERVAL = 2.0
 SKILL_LOG_PATH = os.path.join(LOG_DIR, "skill_state.log")
 SKILL_LOG_INTERVAL = 1.0
 SKILL_LOG_MAX_BYTES = 5 * 1024 * 1024
+# 每次状态变化把 E 图标框裁下来存图(每次启动清空), 用来核对"分数 <-> 图标长什么样"
+SKILL_DUMP_DIR = os.path.join(LOG_DIR, "e_state")
 
 _MODIFIERS = {
     "ctrl", "ctrl_l", "ctrl_r",
@@ -335,6 +337,7 @@ class SkillMonitor:
         self._capture = GameCapture()
         self._state_feature = None
         self._log = None
+        self._last_frame = None
 
     def start(self):
         if self._started:
@@ -388,6 +391,43 @@ class SkillMonitor:
             print(f"[record] skill log close failed: {error}")
         self._log = None
 
+    def _clear_dump_dir(self):
+        try:
+            os.makedirs(SKILL_DUMP_DIR, exist_ok=True)
+            for name in os.listdir(SKILL_DUMP_DIR):
+                if name.endswith(".png"):
+                    os.remove(os.path.join(SKILL_DUMP_DIR, name))
+        except Exception as error:
+            print(f"[record] skill dump dir clear failed: {error}")
+
+    def _dump_icon(self, state):
+        """状态变化时把 E 图标框裁图存盘, 便于核对"分数 <-> 图标长什么样"."""
+        frame = self._last_frame
+        if frame is None:
+            return
+        try:
+            from PIL import Image
+
+            feature = self._feature_set.get_feature_by_name(frame, self.features[0])
+            if feature is None:
+                return
+            crop = frame[
+                feature.y : feature.y + feature.height,
+                feature.x : feature.x + feature.width,
+            ]
+            if crop.size == 0:
+                return
+            now = time.time()
+            stamp = datetime.fromtimestamp(now).strftime("%H%M%S")
+            millis = int((now % 1) * 1000)
+            scores = "_".join(
+                f"{name.split('_')[-1]}{value:.2f}" for name, value in self.scores.items()
+            )
+            name = f"{stamp}_{millis:03d}_{state}_{scores}_wr{self.white_ratio:.2f}.png"
+            Image.fromarray(crop[:, :, ::-1]).save(os.path.join(SKILL_DUMP_DIR, name))
+        except Exception as error:
+            print(f"[record] skill icon dump failed: {error}")
+
     def _run(self):
         try:
             from ok.feature.FeatureSet import FeatureSet
@@ -434,6 +474,7 @@ class SkillMonitor:
             f"window {width}x{height} hwnd={self._capture.hwnd}"
         )
         self._open_log()
+        self._clear_dump_dir()
         self._write_log(f"skill E state={state} {self.detail()}")
         last_beat = time.time()
         last_log = last_beat
@@ -458,6 +499,7 @@ class SkillMonitor:
                 self.event_count += 1
                 print(f"[record] skill E {previous} -> {state} {self.detail()}")
                 self._write_log(f"skill E {previous} -> {state} {self.detail()}")
+                self._dump_icon(state)
                 self.on_event(previous, state, scores, self.white_ratio)
             if self.on_state is not None:
                 self.on_state(state, scores)
@@ -475,6 +517,7 @@ class SkillMonitor:
         frame = self._capture.frame()
         if frame is None:
             raise RuntimeError("no frame from game window")
+        self._last_frame = frame
         scores = {}
         for name in self.features:
             boxes = self._feature_set.find_one_feature(frame, name, threshold=0.001)

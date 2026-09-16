@@ -91,22 +91,35 @@ class TestFourCharCombo(unittest.TestCase):
 
         return Mock(side_effect=find_one)
 
-    def test_second_gold_needs_gold_lost_then_gold_again(self):
-        self.task.COMBO_SECOND_GOLD_MAX = 0.5
-        self.task.find_one = self._conf_sequence([0.85, 0.50, 0.10, 0.80])
+    def test_second_gold_exits_early_when_charge_seen(self):
+        start = time.time()
+
+        def find_one(*args, **kwargs):
+            elapsed = time.time() - start
+            if elapsed < 0.05:
+                return Mock(confidence=0.85)  # 第一次金 E(闪避攻击)
+            if elapsed < 0.35:
+                return Mock(confidence=0.10)  # 蓄力: 金 E 消失
+            return Mock(confidence=0.80)  # 第二次金 E
+
+        self.task.DODGE_COMBO_HOLD = 1.0
+        self.task.find_one = Mock(side_effect=find_one)
 
         result, damaged = self.task._hold_until_gold(require_second_gold=True)
 
         self.assertIs(result, HoldResult.GOLD)
         self.assertFalse(damaged)
+        self.assertLess(time.time() - start, 1.0)  # 提前收手, 没等到上限
 
-    def test_second_gold_missing_when_first_gold_never_lost(self):
-        self.task.COMBO_SECOND_GOLD_MAX = 0.05
-        self.task.find_one = self._conf_sequence([0.85, 0.85, 0.85])
+    def test_dodge_hold_proceeds_at_deadline_when_charge_never_seen(self):
+        # 实测: 蓄力期间 E 模板一直是金(看不到变白), 到点必须照常收手点按, 不能抛异常
+        self.task.DODGE_COMBO_HOLD = 0.3
+        self.task.find_one = self._conf_sequence([0.85, 0.85, 0.85, 0.85])
 
-        result, _damaged = self.task._hold_until_gold(require_second_gold=True)
+        result, damaged = self.task._hold_until_gold(require_second_gold=True)
 
-        self.assertIs(result, HoldResult.NO_GOLD)
+        self.assertIs(result, HoldResult.GOLD)
+        self.assertFalse(damaged)
 
 
 if __name__ == "__main__":

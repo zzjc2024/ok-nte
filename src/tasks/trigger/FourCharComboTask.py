@@ -109,9 +109,12 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     GOLD_THRESHOLD = 0.45
     # 判"金 E 已经没了"(蓄力攻击吃掉了第一次金 E)用更低的值, 免得被金 E 的暗相位骗到
     GOLD_LOST_THRESHOLD = 0.35
-    # 闪避反击后的长按要等"第二次金 E": 第一次金 E 结束后蓄力约 0.7s 才会再变金,
-    # 手动实测(3 次)从长按到第二次金 E 约 1.26s, 松手在 1.33~1.38s。
-    COMBO_SECOND_GOLD_MAX = 1.8
+    # 闪避反击后的长按: 实测(2026-09-16, 7 次)E 模板在蓄力期间**一直是金**(0.52~0.79),
+    # 看不到"变白再变金", 所以以时间为主: 从开始长按到松手点按 = 1.10~1.57s, 中位 1.34s。
+    DODGE_COMBO_HOLD = 1.35
+    # 万一某次真看到金 E 掉下去(gold < GOLD_LOST_THRESHOLD)并持续这么久, 就当蓄力,
+    # 等它再变金就提前收手(0.2s 是为了排除闪避命中的瞬时闪白, 实测只有 0.05s)
+    SECOND_GOLD_CHARGE_MIN = 0.2
     DAFFODILL_FIELD_TIME = 1.5
     PAD_FIELD_TIME = 1.5
     IROI_FUNNEL_POST_SLEEP = 0.3
@@ -137,8 +140,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     SOUND_IMMEDIATE_SPAM_TIME = 1.2
     SOUND_SUCCESS_CLICK_DOWN = 0.08
     # 闪避反击动画时长: 点完左键要等它放完, 期间长按普攻不生效(会不出金 E 而被误判异常)。
-    # 手动实测"闪避成功音 -> 开始长按"中位 0.46s, 减去点按 0.08s 约 0.38s。未实测校准。
-    DODGE_COUNTER_WAIT = 0.35
+    # 实测(2026-09-16, 7 次)反击左键 -> 开始长按 = 0.12~0.25s, 取 0.2s。
+    DODGE_COUNTER_WAIT = 0.2
     SCRIPT_TICK = 0.05
 
     # 必须与 BaseCombatTask.refresh_cd() 里的 OCR 区域保持一致
@@ -858,13 +861,14 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         gold = False
         best_conf = 0.0
         phase = 0  # 0=等第一次金 E, 1=等金 E 消失(蓄力开始), 2=等第二次金 E
+        lost_since = 0.0
         try:
             with self.skip_sleep_checks() as skip:
                 skip.check_combat = True
                 start = time.time()
                 min_until = start + (0.0 if require_second_gold else self.COMBO_HOLD_MIN)
                 max_until = start + (
-                    self.COMBO_SECOND_GOLD_MAX if require_second_gold else self.COMBO_HOLD_MAX
+                    self.DODGE_COMBO_HOLD if require_second_gold else self.COMBO_HOLD_MAX
                 )
                 while time.time() < max_until:
                     if interrupt_event is not None and interrupt_event.is_set():
@@ -884,11 +888,18 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                             logger.info(
                                 f"second gold: first gold E seen (dodge attack), conf={conf:.3f}"
                             )
-                        elif phase == 1 and conf < self.GOLD_LOST_THRESHOLD:
-                            phase = 2
-                            logger.info(
-                                f"second gold: first gold E gone (charge started), conf={conf:.3f}"
-                            )
+                        elif phase == 1:
+                            if conf < self.GOLD_LOST_THRESHOLD:
+                                if lost_since == 0.0:
+                                    lost_since = time.time()
+                                elif time.time() - lost_since >= self.SECOND_GOLD_CHARGE_MIN:
+                                    phase = 2
+                                    logger.info(
+                                        f"second gold: gold E gone for "
+                                        f"{time.time() - lost_since:.2f}s (charge), conf={conf:.3f}"
+                                    )
+                            else:
+                                lost_since = 0.0
                         elif phase == 2 and conf >= self.GOLD_THRESHOLD:
                             gold = True
                             logger.info(f"second gold: second gold E ready, conf={conf:.3f}")
@@ -915,6 +926,13 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             return HoldResult.DODGE, damaged
         if gold:
             logger.info(f"zankou gold E detected, conf={best_conf:.3f}")
+            return HoldResult.GOLD, damaged
+        if require_second_gold:
+            # 实测蓄力期间 E 模板一直是金, 看不到"变白再变金": 到点就按用户手动的方式收手点按
+            logger.info(
+                f"dodge combo hold deadline reached ({self.DODGE_COMBO_HOLD}s), "
+                f"proceed with the follow-up attack (best conf={best_conf:.3f}, phase={phase})"
+            )
             return HoldResult.GOLD, damaged
         logger.warning(
             f"zankou gold E not detected, best conf={best_conf:.3f} "
