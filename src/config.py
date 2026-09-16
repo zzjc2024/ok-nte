@@ -50,6 +50,7 @@ sound_trigger_config_option = ConfigOption(
         "Dodge Threshold": 0.13,
         "Counter Attack Threshold": 0.12,
         "Dodge Success Threshold": 0.3,
+        "Dodge Motion Threshold": 0.3,
     },
     description="Sound-based dodge and counter trigger settings",
     config_description={
@@ -58,6 +59,7 @@ sound_trigger_config_option = ConfigOption(
         "Dodge Threshold": "Dodge sound recognition threshold (0.0-1.0, lower is more sensitive)",
         "Counter Attack Threshold": "Counter attack sound recognition threshold (0.0-1.0, lower is more sensitive)",
         "Dodge Success Threshold": "Dodge success sound recognition threshold (0.0-1.0, lower is more sensitive)",
+        "Dodge Motion Threshold": "Dodge motion (whoosh) sound recognition threshold (0.0-1.0, lower is more sensitive)",
     },
 )
 

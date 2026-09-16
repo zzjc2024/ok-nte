@@ -43,9 +43,22 @@
 - **环合 ≥90% 不再互切**：`_zankou_combo_switch` 里读 `cycle_ratio()`，`>= CYCLE_STAY_RATIO(0.9)` 时**不再切达芙蒂尔**，而是留在残虹身上连点左键（`_stay_until_cycle_full`）直到环合满，然后切伊洛伊。
 - 残虹环合满 → 切**伊洛伊** → 回主循环起点。
 
-### 1.3 残虹二连
+### 1.3 残虹二连（金 E 长按）
 
-长按左键（最低 `COMBO_HOLD_MIN=0.7s`、最长 `COMBO_HOLD_MAX=2.0s`，轮询 `Labels.zankou_skill_gold`，阈值 `GOLD_THRESHOLD=0.7`）→ 松开 → 等 `COMBO_RELEASE_GAP=0.06s` → 单击左键 → 等 `COMBO_CLICK_GAP=0.05s` → 立即切人。闪避反击导致 E 变金也走这套。
+长按左键（最低 `COMBO_HOLD_MIN=0.67s`、最长 `COMBO_HOLD_MAX=0.9s`，轮询 `Labels.zankou_skill_gold`，阈值 `GOLD_THRESHOLD=0.7`）→ 松开 → 等 `COMBO_RELEASE_GAP=0.06s` → 单击左键 → 等 `COMBO_CLICK_GAP=0.05s` → 立即切人。开局金 E、闪避反击导致 E 变金都走这套（`_hold_until_gold` + `_zankou_hold_with_recovery`）。
+
+> **长按上限绝对不许回到 2s。** 金 E 在 ~0.67~0.8s 出现（手动实测长按 0.87~0.99s 是"看到变金后再松手"），到 0.9s 还没金就是异常。
+
+**长按没出金 E 时分流**（`_zankou_hold_with_recovery`）：
+
+| 情况 | 判据 | 处理 |
+|---|---|---|
+| 掉血了 | 长按期间**多次采样**血条像素数，出现下降 | 大概率被打断 → `_dodge_until_triggered()`：连按 shift 直到听到**闪避动作音**（见 1.6），确认闪避真的触发后再重打长按（最多 `COMBO_DODGE_RETRY_MAX=3` 轮） |
+| 没掉血 | 全程没看到血条下降 | 可控状态下长按不出金 E 不可能 → `_raise_combo_anomaly()`：落盘现场 → `disable()` 停任务 → 抛 `ZankouComboAnomaly` |
+
+- 血条必须**连续采样**（`_health_pixels()` = 当前角色血条红条掩码的非零像素数），不能只取首尾两次：伊洛伊大招会在后台回血，只取两次会出现"采样→掉血→回血→采样"而看不到掉血。判据是"相对历史峰值的下降" `> max(HEALTH_DROP_MIN_PIXELS=4, peak*HEALTH_DROP_RATIO=0.02)`。
+- 一帧血条都没取到（`health_samples == 0`）时无法证明"没掉血"，按"被打断"走闪避重试，不抛异常。
+- 闪避重试期间若听到的是**成功闪避音**，则走现成的 `_sound_dodge_success_action()`（点按左键 → 二连），不再补一次。
 
 **切人之后必须先停一下**：`_zankou_combo_switch()` 里 `_switch_to(zankou)` 确认后要 `sleep SWITCH_SETTLE_TIME=0.1s` 再长按。实测切人确认后 **0.001s** 就长按会全空（金 E `conf=0.000`）——切人确认只代表"头像检测到目标上场"，角色还在切人动画里，普攻不生效。
 
@@ -70,15 +83,19 @@
 点 Q → `_wait_iroi_cutscene()` 等脱离大招动画（`is_in_team` 恢复）→ 复用**原版** `iroi._wait_ultimate_unfreeze`（内部 `mouse_down` 长按，等待信号 = `box_ultimate` 图标变化 / Q 不可用）→ `mouse_up` → `sleep IROI_FUNNEL_POST_SLEEP=0.3s` → **单击左键**。
 - 结尾 `sleep 0.3s + 单击左键` 是本脚本额外要求，原版没有。
 
-### 1.6 声音触发：闪避 与 闪避成功反击
+### 1.6 声音触发：闪避 / 闪避成功反击 / 闪避动作确认
 
-两条音效各司其职，**不再是"听到警报就反击"**：
+三条音效各司其职，**不再是"听到警报就反击"**：
 
 - **攻击警报音**（`dodge.wav` / `counter.wav`）→ 只按闪避（`d`+`lshift`），不做反击。
 - **闪避成功音**（`dodge_success.wav`，阈值 = 配置项 `Dodge Success Threshold`，默认 **0.3**）→ 触发反击连招：
   - **当前是残虹**：**点按左键 0.08s → 等 0.18s → 残虹二连**（长按仍按到金 E，`_hold_until_gold`）。实测手动中位：点按后 0.27s 起长按、长按 1.09s、短按 0.10s（取偏低值是为了抢时间）。
   - **非残虹**：保持原逻辑 —— 连点左键 + 连点切人键（切残虹）`SOUND_IMMEDIATE_SPAM_TIME=1.2s`，随后主循环 `_switch_to(zankou)` + 残虹二连。
-
+- **闪避动作音**（`dodge_motion_1/2/3.wav`，阈值 = 配置项 `Dodge Motion Threshold`，默认 **0.3**）→ **只做通知**：告诉任务"闪避真的触发了"。
+  - 用途：二连/金 E 长按没出金且**掉血**时，`_dodge_until_triggered()` 连按 shift，直到听到这个音才算闪避生效（角色不可控时按 shift 不会有这个音）。
+  - 它是**通知不是动作**：在 `_check_triggers` 里放在节流之前、不占用 `_last_trigger_time`，避免被别的音效挤掉；只用自己的 `_dodge_motion_interval=0.3s` 去重。
+  - 链路：`SoundCombatContext._notify_task_dodge_motion()` → 任务 `on_dodge_motion_sound()`（跑在声音线程，只置 `_dodge_motion_heard` 事件）。
+  - 3 个模板是同一段"残虹闪避音"的 3 种音色变体（见 §6 第 16 条），取最大值判定。
 - **反击连招可被新警报打断**：残虹二连**长按期间**若又听到攻击警报，立即打断 → **闪避 → 点按左键 → 再等 0.18s → 再打二连**。
   - 机制：`SoundCombatContext._notify_task_alert()` 在动作入队**之前**回调任务的 `on_sound_alert()`（跑在声音监听线程），任务只置 `_alert_interrupt` 事件；`_zankou_combo_interruptible()` 在长按轮询里检查该事件。不依赖 `sleep_check`，因为连招期间已经 `skip.all = True`。
 - **为什么不用警报音当"闪避成功"判据**：实测同一份录音里警报音检出 17 次、闪避成功音 15 次，时间对不上（警报普遍早 0.45~0.6s），且约 3 次闪避完全没有警报音。
@@ -140,7 +157,10 @@
 | `_daffodill_until_cycle_full` / `_daffodill_window` | 达芙蒂尔循环（1.5s 窗口 / Q 可用即走） |
 | `_pad_until_q` | 伊洛伊/早雾 Q 不可放时的垫刀；记录 `_pad_target` 供声音反击用 |
 | `_skill_until_registered` | 只在 E 图标亮时连按 E 到 E 进 CD 即返回（替代阻塞的 `click_skill`） |
-| `_zankou_gold_e` / `_zankou_combo` / `_hold_until_gold` | 开局金 E / 二连 / 长按轮询金 E |
+| `_zankou_gold_e` / `_zankou_combo` / `_hold_until_gold` | 开局金 E / 二连 / 长按轮询金 E（返回 `(HoldResult, damaged)`，期间多次采样血条） |
+| `_zankou_hold_with_recovery` | 长按 + 失败分流：掉血 → 闪避重试；没掉血 → 抛 `ZankouComboAnomaly` 停任务 |
+| `_dodge_until_triggered` / `_press_dodge` | 连按 shift 直到听到闪避动作音（`DODGE_RETRY_TIMEOUT=3s`，超时抛异常） |
+| `_health_pixels` / `_health_drop_margin` / `_raise_combo_anomaly` | 血条红条像素数 / 掉血判据 / 落盘+停任务+抛异常 |
 | `_zankou_double_q` / `_press_q_through_animations` | 双 Q（连按 Q + 确认 enter1/exit1/enter2/exit2），之后交给 `_wait_double_q_recovery` |
 | `_zankou_combo_switch` / `_stay_until_cycle_full` | 切残虹二连后按 `cycle_ratio()` 决定切谁；环合 ≥0.9 时留场打到满 |
 | `_cast_q` / `_press_q_ready` / `_press_q_until_registered` / `_q_registered` | 单 Q：连按到注册 + 等可控 |
@@ -149,7 +169,8 @@
 | `_wait_controllable` / `_wait_in_team` | 可控（冷却变化或 Q 由亮变灭）/ 脱离动画 |
 | `_maybe_log_combat_state` | 低频打印各脱战信号，定位"敌人已死但 in_combat 仍为 True" |
 | `_sound_dodge_action` / `_sound_counter_action` | 听到攻击警报：只按闪避（反击已改由闪避成功音触发） |
-| `_sound_dodge_success_action` | 听到闪避成功音：残虹 → 点左键 0.08s + 等 0.18s + 二连；非残虹 → `_sound_immediate_reaction` |
+| `_sound_dodge_success_action` | 听到闪避成功音：残虹 → 点左键 0.08s + 等 0.18s + 二连；非残虹 → `_sound_immediate_reaction`；置 `_dodge_success_heard` |
+| `on_sound_alert` / `on_dodge_motion_sound` | 声音线程回调：攻击警报 → `_alert_interrupt`；闪避动作音 → `_dodge_motion_heard` |
 | `_sound_immediate_reaction` / `_maybe_handle_sound_counter` | 非残虹反击：连点左键 + 连点切人键，随后主循环切残虹打二连 |
 | `_switch_to` / `_ensure_current` | 切人：先 `_wait_in_team` 等脱离动画，再 `_confirm_switch` |
 | `_confirm_switch` | **自研切人确认**：重按切人键直到图像确认目标上场；不采信 `active health change`，不额外点击 |
@@ -159,8 +180,10 @@
 ### 4.2 关键常量（`FourCharComboTask`）
 
 ```
-COMBO_HOLD_MIN=0.7  COMBO_HOLD_MAX=2.0  COMBO_POLL_INTERVAL=0.05
+COMBO_HOLD_MIN=0.67  COMBO_HOLD_MAX=0.9  COMBO_POLL_INTERVAL=0.05
 COMBO_RELEASE_GAP=0.06  COMBO_CLICK_GAP=0.05  GOLD_THRESHOLD=0.7
+COMBO_DODGE_RETRY_MAX=3  HEALTH_DROP_RATIO=0.02  HEALTH_DROP_MIN_PIXELS=4
+DODGE_RETRY_TIMEOUT=3.0  DODGE_RETRY_INTERVAL=0.15
 DAFFODILL_FIELD_TIME=1.5  PAD_FIELD_TIME=1.5  IROI_FUNNEL_POST_SLEEP=0.3
 Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTERVAL=0.12
 ENTRY_SKILL_WAIT=1.6  SWITCH_SETTLE_TIME=0.1  SUPPRESS_SWITCH_CLICK=True  SWITCH_CONFIRM_TIMEOUT=3.0
@@ -215,6 +238,13 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 | `is_cycle_full()` | `cycle_ratio() > 0.9`（原实现，行为不变） |
 | `_cycle_bar_white_pixels()` | 同款环形区域的白像素数（本任务加，仅对照采样） |
 
+### 5.4b 玩家血条（掉血判据）
+| 方法 | 说明 |
+|---|---|
+| `_get_health_box(frame)` / `_get_health_snapshot(frame)` | 当前角色血条红条的颜色掩码（`char_health_color`）；血条位置来自 `is_in_team()` 的斜杠框右移 |
+| `is_health_changed(frame)` | 框架版：血条快照模板匹配；**和框架切人判断共用 `scene` 快照**，本任务不用它 |
+| `_health_pixels()` | 本任务加：血条掩码的非零像素数，用于"多次采样看掉血" |
+
 ### 5.5 战斗
 `in_combat()` / `do_check_in_combat()`（scene 缓存 + combat_detect）、`combat_detect(frame, target, lv, force)`、`is_boss()`（boss Lv 文字模板）、`has_health_bar()` / `_find_red_health_bar()`（敌人红血条颜色块）、`find_target(sync, frame, force)`（OpenVINO）、`find_lv(frame, threshold)`、`combat_detect_uncertain`、`combat_detect_state.miss_count`、`_boss_fight`。
 
@@ -229,7 +259,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 `scene.in_combat()` / `set_in_combat()` / `set_not_in_combat()`、`scene.is_in_team(fun)` / `get_is_in_team_record()`、`scene.health_snapshot()` / `clear_health_snapshot()`、`scene.cd_refreshed`。
 
 ### 5.8 声音
-`SoundListener`（`dodge_score` / `counter_score` / `dodge_success_score`；模板 `assets/sounds/dodge.wav`、`counter.wav`、`dodge_success.wav`）、`SoundCombatContext`（`dodge_action` / `counter_action` / `dodge_success_action` 回调、抢占）、`DodgeCounterTrigger`（`execute_dodge` / `execute_counter_attack` / `execute_dodge_success`）。阈值在配置项 `Sound Trigger Config`：`Dodge Threshold` / `Counter Attack Threshold` / `Dodge Success Threshold`。
+`SoundListener`（`dodge_score` / `counter_score` / `dodge_success_score` / `dodge_motion_score`；模板 `assets/sounds/dodge.wav`、`counter.wav`、`dodge_success.wav`、`dodge_motion_1/2/3.wav`）、`SoundCombatContext`（`dodge_action` / `counter_action` / `dodge_success_action` 回调、抢占；`on_dodge_motion_triggered` 只通知任务，`discard_pending_action()` 丢弃待处理动作）、`DodgeCounterTrigger`（`execute_dodge` / `execute_counter_attack` / `execute_dodge_success`）。阈值在配置项 `Sound Trigger Config`：`Dodge Threshold` / `Counter Attack Threshold` / `Dodge Success Threshold` / `Dodge Motion Threshold`。
 
 ---
 
@@ -258,6 +288,14 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 
     为什么：`get_cd()` 是"OCR 值 − 自快照以来的时间"，冷却数字只要挂在屏幕上它就一直变小（即使游戏冻结冷却），所以旧 `_wait_cd_ticking()` 实际只等到"数字第二次可见"，HUD 一回来就触发；游戏在 Q 动画期间把冷却数字冻结在满值，原始数字开始变小才是动画真正结束。实测手动间隔 **5.04/5.09/5.25s**（3 次），旧逻辑只有 **3.09s**，早约 2s，那 2.0s 长按全落在动画/收招里，普攻不生效 → `zankou gold E not detected, best conf=0.000` → 二连接不上。**同理：`_switch_to()` 刚确认就长按也是全空**（切人确认后 0.001s 那次）。现在由 `_wait_double_q_recovery()` 把关。
 
+16. **闪避动作音的模板必须从"安静录音"里切（血坑）**：闪避动作音（`dodge_motion_*.wav`）是个很短的"嗖"声，混在背景音乐里时**相关值主要来自音乐**。第一版从带音乐的 `logs/20次闪避动作.wav` 里切，结果：
+    - 同一段录音里闪避点两两相关只有 0.3~0.4，而"只有音乐"的底噪相关就有 0.15，闪避点最低分（0.02~0.05）甚至低于背景最高分（0.13~0.33）→ 完全不可用；
+    - 根因：模板本身就是"音乐+闪避音"，匹配上的其实是音乐。
+    正确做法（用户重录 `logs/残虹10次闪避.wav`，**只按闪避、不移动**）：从干净录音里切模板，再拿它去匹配带音乐的录音。验证结果：3 个模板取最大值，**20 次录音 20/20、30 次录音 30/30、10 次录音 10/10**，命中分 0.94~1.00，干净背景 ≤0.05（阈值 0.3 余量巨大）。
+    - 顺带结论：闪避音有**3 种音色变体**（同一段录音里 3 族，族内 0.35~0.39、族间 0.16~0.20），所以用 3 个模板取 max；只用一个模板只能覆盖 1/3。
+    - 另一个坑：**边移动边闪避**会把脚步声叠进来（用户第一版 30 次录音里就有 2 次其实不是闪避——频谱重心 1.3~2.5kHz，其余都在 4.2~5.0kHz）。录制模板时要"只按闪避、不移动"。
+    - 闪避成功音**包含**闪避动作音（先有闪避动作、再弹成功音），所以"成功闪避"那几次也能被闪避动作音模板命中；反过来只有普通闪避时才只有动作音。
+
 ---
 
 ## 7. 日志 / 环境 / 命令 / 版本管理
@@ -266,6 +304,9 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
 - **流程日志（首选）**：`logs/four_combo.log`。`_ensure_combo_log_handler()` 给 `ok` logger 挂带 `_ComboLogFilter` 的 FileHandler；放行条件 = **日志正文或 logger 名**含 `FourCharComboTask` / `four_combo` / `four char combo` / `CombatCheck` / `Dodge` / `SoundCombatContext` / `SoundListener` 任一。`__init__` 与每次 `run()` 确保 handler 存在。
   - 看 logger 名是为了让这些模块自身的日志也能进来（否则形如 `Zankou skill registered` 这种不含关键词的正文会被漏掉）。
   - 排查"敌人死了但还卡在战斗状态"：搜 `four char combo combat state [tag]`，这行由 `_maybe_log_combat_state()` 每 `COMBAT_STATE_LOG_INTERVAL=2s` 打印一次，含 `in_combat / scene_cache / uncertain / miss / boss_flag / is_boss / lv / target / health_bar`，一眼看出是哪个信号把战斗状态按住了。
+  - 异常/失败现场：`_dump_q_cd_state(tag)` 会把整帧 + 右下技能条裁剪写到 `logs/four_combo_<tag>_<时间>.png`，并在日志里打一行 `four combo q cd dump [tag] saved=... ocr=[名字@(x,y)...] cds={...} current=...`。tag 取值：`q_not_ready` / `combo_ready_timeout` / `combo_anomaly`。
+  - 金 E 长按结果：`zankou gold E detected, conf=...` / `zankou gold E not detected, best conf=... (hold=0.9s, health_samples=N, health_peak=P, damaged=True/False)`；分流日志：`zankou gold E missing but damaged, dodge then retry (i/3)` / `dodge retry: dodge motion heard, dodge triggered` / `dodge retry: perfect dodge heard, ...` / `four char combo anomaly: ...`。
+  - 声音：`Dodge MOTION TRIGGERED! score: ...`（闪避动作音命中）、`Audio monitoring - ... dodge_motion_score: ...`（每 20s 一次）。
   - `BaseCombatTask.ultimate_available()` 里的 `char:N, ult:..., conf:...` 已用 `run_with_interval(..., 1, action_name=f"ultimate_available_log_{index}")` 节流到**每角色 1 条/秒**。它原先每轮无条件打印，而 `Iroi._wait_ultimate_unfreeze` 在特写期间以 ~250 次/秒轮询它，会把日志刷爆。加日志时注意别在轮询热路径里直接 `log_info`。
 - **键鼠日志**：`logs/four_combo_actions.log`。格式 `HH:MM:SS.mmm +间隔s [phase] 操作`；每次启动写 `==== session YYYY-MM-DD HH:MM:SS ====`。phase 取值：`precombat_gold_e` / `precombat_daffodill_q` / `opener` / `loop` / `pad_until_q` / `zankou_gold_e` / `zankou_enter` / `zankou_combo` / `zankou_double_q` / `zankou_cycle_full` / `iroi_funnel` / `daffodill_window` / `sound_success` / `sound_success_interrupt`。本地生成物，不要提交。
 - 全量日志：`logs/ok-script.log`（每天午夜轮转、保留 7 天）。

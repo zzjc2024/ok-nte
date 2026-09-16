@@ -9,7 +9,7 @@
 import threading
 import time
 import warnings
-from typing import Optional, cast
+from typing import Optional, Sequence, cast
 
 import librosa
 import numpy as np
@@ -44,6 +44,8 @@ class SoundListener:
         counter_attack_threshold: float = 0.12,
         dodge_success_sample_path: str = "",
         dodge_success_threshold: float = 0.3,
+        dodge_motion_sample_paths: Sequence[str] = (),
+        dodge_motion_threshold: float = 0.25,
         expansion_ratio: float = 1.0,
         is_allow_successive_trigger: bool = False,
         process_name: str = default_process_name,
@@ -51,9 +53,11 @@ class SoundListener:
         self.sample_path = sample_path
         self.counter_attack_sample_path = counter_attack_sample_path
         self.dodge_success_sample_path = dodge_success_sample_path
+        self.dodge_motion_sample_paths = tuple(dodge_motion_sample_paths)
         self.threshold = threshold
         self.counter_attack_threshold = counter_attack_threshold
         self.dodge_success_threshold = dodge_success_threshold
+        self.dodge_motion_threshold = dodge_motion_threshold
         self.expansion_ratio = expansion_ratio
         self.is_allow_successive_trigger = is_allow_successive_trigger
         self.process_name = process_name
@@ -65,16 +69,20 @@ class SoundListener:
         self._listener_thread: Optional[threading.Thread] = None
         self._last_trigger_time = 0.0
         self._trigger_interval = 0.25
+        self._last_dodge_motion_time = 0.0
+        self._dodge_motion_interval = 0.3
 
         self._sample_waveform = None
         self._counter_sample_waveform = None
         self._dodge_success_sample_waveform = None
+        self._dodge_motion_sample_waveforms = []
         self._b = None
         self._a = None
 
         self.on_dodge_triggered = None
         self.on_counter_triggered = None
         self.on_dodge_success_triggered = None
+        self.on_dodge_motion_triggered = None
         self._capture: Optional[AudioCaptureSource] = None
         self._log_gate = LogGate(logger)
 
@@ -104,13 +112,20 @@ class SoundListener:
                 self._dodge_success_sample_waveform = self._normalize_waveform(
                     self._load_and_cache(self.dodge_success_sample_path)
                 )
+            for path in self.dodge_motion_sample_paths:
+                if not path:
+                    continue
+                self._dodge_motion_sample_waveforms.append(
+                    self._normalize_waveform(self._load_and_cache(path))
+                )
 
             logger.info(f"Sound samples loaded: {self.used_sr}Hz")
         except Exception as e:
             message = (
                 "Failed to load sound samples: "
                 f"dodge={self.sample_path}, counter={self.counter_attack_sample_path}, "
-                f"dodge_success={self.dodge_success_sample_path}: {e}"
+                f"dodge_success={self.dodge_success_sample_path}, "
+                f"dodge_motion={self.dodge_motion_sample_paths}: {e}"
             )
             logger.error(message)
             raise RuntimeError(message) from e
@@ -334,28 +349,59 @@ class SoundListener:
                     norm_window,
                     self._dodge_success_sample_waveform,
                 )
+            dodge_motion_score = 0.0
+            for motion_waveform in self._dodge_motion_sample_waveforms:
+                dodge_motion_score = max(
+                    dodge_motion_score,
+                    self._match_normalized(norm_window, motion_waveform),
+                )
 
-            self._check_triggers(dodge_score, counter_score, dodge_success_score)
+            self._check_triggers(
+                dodge_score, counter_score, dodge_success_score, dodge_motion_score
+            )
 
             # self._draw_debug_visual(dodge_score, counter_score)
 
             self._log_gate.info(
                 "Audio monitoring - dodge_score: {:.4f} (threshold: {}), "
                 "counter_score: {:.4f} (threshold: {}), "
-                "dodge_success_score: {:.4f} (threshold: {})".format(
+                "dodge_success_score: {:.4f} (threshold: {}), "
+                "dodge_motion_score: {:.4f} (threshold: {})".format(
                     dodge_score,
                     self.threshold,
                     counter_score,
                     self.counter_attack_threshold,
                     dodge_success_score,
                     self.dodge_success_threshold,
+                    dodge_motion_score,
+                    self.dodge_motion_threshold,
                 ),
                 interval=self.log_interval,
                 key="audio_monitoring",
             )
 
-    def _check_triggers(self, dodge_score, counter_score, dodge_success_score=0.0):
+    def _check_triggers(
+        self, dodge_score, counter_score, dodge_success_score=0.0, dodge_motion_score=0.0
+    ):
         now = time.time()
+
+        # 闪避动作音只做"通知"(告诉任务闪避真的触发了), 不是动作, 所以放在节流之前,
+        # 且不占用 _last_trigger_time, 避免被其它音效挤掉。
+        if (
+            dodge_motion_score > 0
+            and dodge_motion_score > self.dodge_motion_threshold
+            and now - self._last_dodge_motion_time >= self._dodge_motion_interval
+        ):
+            if self.on_dodge_motion_triggered:
+                logger.info(
+                    "Dodge MOTION TRIGGERED! score: {:.4f}, threshold: {}".format(
+                        dodge_motion_score,
+                        self.dodge_motion_threshold,
+                    )
+                )
+                self.on_dodge_motion_triggered()
+                self._last_dodge_motion_time = now
+
         if (
             not self.is_allow_successive_trigger
             and now - self._last_trigger_time < self._trigger_interval

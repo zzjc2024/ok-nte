@@ -106,6 +106,59 @@ class SoundListenerTests(unittest.TestCase):
                 dodge_success_sample_path="assets/sounds/__missing_success__.wav",
             )
 
+    def test_missing_dodge_motion_sample_fails_fast(self):
+        from src.sound_trigger.SoundListener import SoundListener
+
+        with self.assertRaises(RuntimeError):
+            SoundListener(
+                sample_path="assets/sounds/dodge.wav",
+                counter_attack_sample_path="",
+                dodge_motion_sample_paths=["assets/sounds/__missing_motion__.wav"],
+            )
+
+    def test_dodge_motion_trigger_uses_its_own_threshold(self):
+        from src.sound_trigger.SoundListener import SoundListener
+
+        class StubListener(SoundListener):
+            def _load_samples(self):
+                pass
+
+        listener = StubListener(
+            sample_path="",
+            counter_attack_sample_path="",
+            dodge_motion_sample_paths=[],
+            dodge_motion_threshold=0.3,
+        )
+        fired = []
+        listener.on_dodge_motion_triggered = lambda: fired.append(True)
+
+        listener._check_triggers(0.0, 0.0, 0.0, 0.29)
+        self.assertEqual(fired, [])
+
+        listener._check_triggers(0.0, 0.0, 0.0, 0.31)
+        self.assertEqual(len(fired), 1)
+
+    def test_dodge_motion_does_not_block_other_triggers(self):
+        from src.sound_trigger.SoundListener import SoundListener
+
+        class StubListener(SoundListener):
+            def _load_samples(self):
+                pass
+
+        listener = StubListener(
+            sample_path="",
+            counter_attack_sample_path="",
+            dodge_motion_sample_paths=[],
+            dodge_motion_threshold=0.3,
+        )
+        events = []
+        listener.on_dodge_motion_triggered = lambda: events.append("motion")
+        listener.on_dodge_triggered = lambda: events.append("dodge")
+
+        listener._check_triggers(0.0, 0.0, 0.0, 0.4)
+        listener._check_triggers(0.5, 0.0, 0.0, 0.0)
+        self.assertEqual(events, ["motion", "dodge"])
+
     def test_dodge_success_trigger_uses_its_own_threshold(self):
         from src.sound_trigger.SoundListener import SoundListener
 

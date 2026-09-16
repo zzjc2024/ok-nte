@@ -915,15 +915,18 @@ class BaseCombatTask(CharElementUIMixin, CombatCheck):
             dodge_thresh = self.sound_config.get("Dodge Threshold", 0.13)
             counter_thresh = self.sound_config.get("Counter Attack Threshold", 0.12)
             dodge_success_thresh = self.sound_config.get("Dodge Success Threshold", 0.3)
+            dodge_motion_thresh = self.sound_config.get("Dodge Motion Threshold", 0.3)
             dodge_thresh = np.clip(dodge_thresh, 0.0, 1.0)
             counter_thresh = np.clip(counter_thresh, 0.0, 1.0)
             dodge_success_thresh = np.clip(dodge_success_thresh, 0.0, 1.0)
+            dodge_motion_thresh = np.clip(dodge_motion_thresh, 0.0, 1.0)
             sound_context.update_config(
                 enable,
                 dodge_all_attacks,
                 dodge_thresh,
                 counter_thresh,
                 dodge_success_thresh,
+                dodge_motion_thresh,
             )
         sound_context.update_task(
             self,

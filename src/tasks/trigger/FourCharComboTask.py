@@ -3,6 +3,7 @@ import os
 import threading
 import time
 from contextlib import contextmanager
+from enum import Enum
 
 import cv2
 import numpy as np
@@ -14,11 +15,26 @@ from src.char.Sakiri import Sakiri
 from src.char.Zankou import Zankou
 from src.combat.BaseCombatTask import BaseCombatTask, NotInCombatException, cd_regex
 from src.Labels import Labels
+from src.sound_trigger.SoundCombatContext import SoundCombatContext
 from src.utils import game_filters as gf
 
 logger = Logger.get_logger(__name__)
 
 COMBO_LOG_PATH = os.path.join("logs", "four_combo.log")
+
+
+class ZankouComboAnomaly(Exception):
+    """残虹长按在可控状态下 0.8~0.9s 没出金 E 且没掉血 -> 状态异常, 停任务排查."""
+
+
+class HoldResult(Enum):
+    """一次残虹长按的结局."""
+
+    GOLD = "gold"  # 金 E 出现, 正常
+    INTERRUPTED = "interrupted"  # 被新攻击警报打断, 上层负责重新闪避
+    NO_GOLD = "no_gold"  # 到上限都没出金 E
+    HANDLED = "handled"  # 成功闪避的反击路径已经自己打完二连, 上层不要再补
+
 _COMBO_LOG_KEYWORDS = (
     "FourCharComboTask",
     "four_combo",
@@ -77,11 +93,16 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     IROI_INDEX = 2
     SAKIRI_INDEX = 3
 
-    COMBO_HOLD_MIN = 0.7
-    COMBO_HOLD_MAX = 0.8
+    COMBO_HOLD_MIN = 0.67
+    COMBO_HOLD_MAX = 0.9
     COMBO_POLL_INTERVAL = 0.05
     COMBO_RELEASE_GAP = 0.06
     COMBO_CLICK_GAP = 0.05
+    COMBO_DODGE_RETRY_MAX = 3
+    HEALTH_DROP_RATIO = 0.02
+    HEALTH_DROP_MIN_PIXELS = 4
+    DODGE_RETRY_TIMEOUT = 3.0
+    DODGE_RETRY_INTERVAL = 0.15
     GOLD_THRESHOLD = 0.7
     DAFFODILL_FIELD_TIME = 1.5
     PAD_FIELD_TIME = 1.5
@@ -129,6 +150,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._in_sound_reaction = False
         self._pad_target = None
         self._alert_interrupt = threading.Event()
+        self._dodge_motion_heard = threading.Event()
+        self._dodge_success_heard = threading.Event()
         self._combat_state_logged_at = 0.0
         self._q_wait_attack_at = 0.0
         self._opener_lost_since = 0.0
@@ -211,6 +234,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._action_phase = ""
         self._suppress_combat_check = False
         self._alert_interrupt.clear()
+        self._dodge_motion_heard.clear()
+        self._dodge_success_heard.clear()
         self._opener_lost_since = 0.0
         self._q_wait_attack_at = 0.0
 
@@ -615,14 +640,17 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     # ------------------------------------------------------------- zankou
 
     def _zankou_gold_e(self):
+        """开局金 E: 长按轮询金E -> 点 E."""
         self._set_action_phase("zankou_gold_e")
-        self._hold_until_gold()
+        if self._zankou_hold_with_recovery() is HoldResult.HANDLED:
+            return
         self._skill_until_registered(self.zankou)
 
     def _zankou_combo(self):
         """残虹二连: 长按轮询金E -> 松开 -> 单击左键 (间隔见 COMBO_* 常量)."""
         self._set_action_phase("zankou_combo")
-        self._hold_until_gold()
+        if self._zankou_hold_with_recovery() is HoldResult.HANDLED:
+            return
         self.sleep(self.COMBO_RELEASE_GAP)
         self.click()
         self.sleep(self.COMBO_CLICK_GAP)
@@ -630,12 +658,92 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     def _zankou_combo_interruptible(self):
         """残虹二连(长按期间可被新攻击警报打断); 返回 True 表示被打断."""
         self._set_action_phase("zankou_combo")
-        if self._hold_until_gold(interrupt_event=self._alert_interrupt):
+        result = self._zankou_hold_with_recovery(self._alert_interrupt)
+        if result is HoldResult.INTERRUPTED:
             return True
+        if result is HoldResult.HANDLED:
+            return False
         self.sleep(self.COMBO_RELEASE_GAP)
         self.click()
         self.sleep(self.COMBO_CLICK_GAP)
         return False
+
+    def _zankou_hold_with_recovery(self, interrupt_event=None):
+        """长按轮询金 E; 没出金 E 时按"是否掉血"分流处理, 返回最终结果.
+
+        - 掉血 = 大概率被打断 -> 连按 shift 直到闪避真的触发, 然后重打长按;
+        - 没掉血 = 状态异常 -> 抛异常停任务 (可控状态下长按不出金 E 不可能)。
+        """
+        for attempt in range(1, self.COMBO_DODGE_RETRY_MAX + 1):
+            result, damaged = self._hold_until_gold(interrupt_event=interrupt_event)
+            if result is not HoldResult.NO_GOLD:
+                return result
+            if not damaged:
+                self._raise_combo_anomaly(
+                    f"zankou gold E missing while not damaged (attempt {attempt}, "
+                    f"hold {self.COMBO_HOLD_MAX}s)"
+                )
+            logger.warning(
+                f"zankou gold E missing but damaged, dodge then retry "
+                f"({attempt}/{self.COMBO_DODGE_RETRY_MAX})"
+            )
+            if not self._dodge_until_triggered():
+                return HoldResult.HANDLED
+        self._raise_combo_anomaly(
+            f"zankou gold E still missing after {self.COMBO_DODGE_RETRY_MAX} dodge retries"
+        )
+
+    def _dodge_until_triggered(self):
+        """连按闪避(shift)直到听到"闪避动作音", 确认闪避真的触发了.
+
+        角色处于不可控状态时按 shift 不会产生闪避动作音, 所以这个音效就是
+        "闪避是否生效"的判据。返回 True = 普通闪避触发, 上层重打长按;
+        返回 False = 触发的是"成功闪避", 现成的成功闪避反击路径已经打完二连。
+        """
+        self._set_action_phase("dodge_retry")
+        self._dodge_motion_heard.clear()
+        self._dodge_success_heard.clear()
+        deadline = time.time() + self.DODGE_RETRY_TIMEOUT
+        with self.skip_sleep_checks() as skip:
+            skip.all = True
+            while time.time() < deadline:
+                self._press_dodge()
+                if self._dodge_success_heard.is_set():
+                    logger.info(
+                        "dodge retry: perfect dodge heard, run the existing dodge-success reaction"
+                    )
+                    SoundCombatContext().discard_pending_action()
+                    self._sound_dodge_success_action()
+                    return False
+                if self._dodge_motion_heard.is_set():
+                    logger.info("dodge retry: dodge motion heard, dodge triggered")
+                    return True
+                self.sleep(self.DODGE_RETRY_INTERVAL)
+        self._raise_combo_anomaly(
+            f"dodge never triggered within {self.DODGE_RETRY_TIMEOUT}s while pressing shift"
+        )
+
+    def _press_dodge(self):
+        """按一次闪避(shift)."""
+        self.send_key("lshift")
+
+    def _health_pixels(self):
+        """当前角色血条的红条像素数; None 表示这一帧没取到."""
+        snapshot = self._get_health_snapshot(self.frame)
+        if snapshot is None:
+            return None
+        return int(np.count_nonzero(snapshot))
+
+    def _health_drop_margin(self, peak):
+        return max(self.HEALTH_DROP_MIN_PIXELS, peak * self.HEALTH_DROP_RATIO)
+
+    def _raise_combo_anomaly(self, reason):
+        """状态异常: 落盘现场 -> 停任务 -> 抛异常让 executor 报错."""
+        message = f"four char combo anomaly: {reason}"
+        logger.error(message)
+        self._dump_q_cd_state("combo_anomaly")
+        self.disable()
+        raise ZankouComboAnomaly(message)
 
     def _zankou_combo_switch(self, default_target):
         """切残虹二连, 再按环合值决定去向.
@@ -671,8 +779,15 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         logger.info(f"four char combo cycle full ratio={self.cycle_ratio():.2f}")
 
     def _hold_until_gold(self, interrupt_event=None):
-        """长按轮询金 E; 返回 True 表示被 interrupt_event 打断."""
+        """长按轮询金 E; 返回 (HoldResult, damaged).
+
+        damaged 由长按期间的**多次**血条采样得出 (伊洛伊大招会在后台回血,
+        只取首尾两次会出现"掉血-回血-采样"而看不到掉血)。
+        """
         interrupted = False
+        damaged = False
+        health_peak = None
+        health_samples = 0
         wait = self._entry_skill_until - time.time()
         if wait > 0:
             logger.info(f"zankou wait entry skill {wait:.2f}s before combo")
@@ -698,16 +813,32 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                     if time.time() >= min_until and conf >= self.GOLD_THRESHOLD:
                         gold = True
                         break
+                    pixels = self._health_pixels()
+                    if pixels is not None:
+                        health_samples += 1
+                        if health_peak is None or pixels > health_peak:
+                            health_peak = pixels
+                        elif pixels < health_peak - self._health_drop_margin(health_peak):
+                            damaged = True
                     self.sleep(self.COMBO_POLL_INTERVAL)
         finally:
             self.mouse_up()
         if interrupted:
             logger.info("zankou combo hold interrupted by new attack alert")
-        elif gold:
+            return HoldResult.INTERRUPTED, damaged
+        if gold:
             logger.info(f"zankou gold E detected, conf={best_conf:.3f}")
-        else:
-            logger.warning(f"zankou gold E not detected, best conf={best_conf:.3f}")
-        return interrupted
+            return HoldResult.GOLD, damaged
+        logger.warning(
+            f"zankou gold E not detected, best conf={best_conf:.3f} "
+            f"(hold={self.COMBO_HOLD_MAX}s, health_samples={health_samples}, "
+            f"health_peak={health_peak}, damaged={damaged})"
+        )
+        if health_samples == 0:
+            # 一帧血条都没取到 -> 无法证明"没掉血", 走更安全的闪避重试分支
+            logger.warning("zankou health not sampled during hold, assume interrupted")
+            damaged = True
+        return HoldResult.NO_GOLD, damaged
 
     def _zankou_double_q(self):
         """残虹双 Q.
@@ -1066,6 +1197,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
               二连长按期间若又听到攻击警报, 立即打断: 闪避 -> 点按左键 -> 再等 -> 再打二连。
         其他角色: 保持原逻辑(连点左键+连点切人键), 随后主循环切残虹打二连。
         """
+        self._dodge_success_heard.set()
         current = self.get_current_char(raise_exception=False)
         with self.skip_sleep_checks() as skip:
             skip.all = True
@@ -1086,6 +1218,10 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     def on_sound_alert(self):
         """攻击警报回调(在声音监听线程上): 只置标志, 供连招中途被打断."""
         self._alert_interrupt.set()
+
+    def on_dodge_motion_sound(self):
+        """闪避动作音回调(在声音监听线程上): 说明闪避真的触发了."""
+        self._dodge_motion_heard.set()
 
     def _sound_immediate_reaction(self):
         """触发闪避反击后第一时间连点左键并连点切人键."""
@@ -1112,7 +1248,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         try:
             self._switch_to(self.zankou)
             self._zankou_combo()
-        except NotInCombatException:
+        except (NotInCombatException, ZankouComboAnomaly):
             raise
         except Exception as e:
             logger.error("sound counter reaction error", e)

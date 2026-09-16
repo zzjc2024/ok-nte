@@ -1,6 +1,6 @@
 import threading
 import time
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional, Sequence
 
 from ok import Logger
 
@@ -120,10 +120,12 @@ class SoundCombatContext:
         sample_path: str = "./assets/sounds/dodge.wav",
         counter_attack_sample_path: str = "./assets/sounds/counter.wav",
         dodge_success_sample_path: str = "./assets/sounds/dodge_success.wav",
+        dodge_motion_sample_paths: Sequence[str] = (),
         dodge_all_attacks: bool = True,
         threshold: float = 0.13,
         counter_attack_threshold: float = 0.12,
         dodge_success_threshold: float = 0.3,
+        dodge_motion_threshold: float = 0.25,
         dodge_action: Optional[Callable] = None,
         counter_action: Optional[Callable] = None,
         dodge_success_action: Optional[Callable] = None,
@@ -140,6 +142,7 @@ class SoundCombatContext:
                     threshold,
                     counter_attack_threshold,
                     dodge_success_threshold,
+                    dodge_motion_threshold,
                 ) = self._pending_config
 
             self._enable_sound_trigger = enable_sound_trigger
@@ -157,17 +160,21 @@ class SoundCombatContext:
                 raise ValueError("counter_attack_threshold must be between 0.0 and 1.0")
             if not (0.0 <= dodge_success_threshold <= 1.0):
                 raise ValueError("dodge_success_threshold must be between 0.0 and 1.0")
+            if not (0.0 <= dodge_motion_threshold <= 1.0):
+                raise ValueError("dodge_motion_threshold must be between 0.0 and 1.0")
 
             audio_process_name = _game_audio_process_name()
             self._config = {
                 "sample_path": sample_path,
                 "counter_attack_sample_path": counter_attack_sample_path,
                 "dodge_success_sample_path": dodge_success_sample_path,
+                "dodge_motion_sample_paths": tuple(dodge_motion_sample_paths),
                 "dodge_all_attacks": dodge_all_attacks,
                 "audio_process_name": audio_process_name,
                 "threshold": threshold,
                 "counter_attack_threshold": counter_attack_threshold,
                 "dodge_success_threshold": dodge_success_threshold,
+                "dodge_motion_threshold": dodge_motion_threshold,
             }
 
             from src.sound_trigger.SoundListener import SoundListener
@@ -178,6 +185,8 @@ class SoundCombatContext:
                 counter_attack_threshold=counter_attack_threshold,
                 dodge_success_sample_path=dodge_success_sample_path,
                 dodge_success_threshold=dodge_success_threshold,
+                dodge_motion_sample_paths=dodge_motion_sample_paths,
+                dodge_motion_threshold=dodge_motion_threshold,
                 process_name=audio_process_name,
             )
 
@@ -191,6 +200,7 @@ class SoundCombatContext:
             self._listener.on_dodge_triggered = self._on_dodge_triggered
             self._listener.on_counter_triggered = self._on_counter_triggered
             self._listener.on_dodge_success_triggered = self._on_dodge_success_triggered
+            self._listener.on_dodge_motion_triggered = self._on_dodge_motion_triggered
             self._listener.is_computation_required = self._is_computation_required
 
             self._is_active = True
@@ -291,6 +301,32 @@ class SoundCombatContext:
 
     def _on_dodge_success_triggered(self):
         self._queue_action("dodge_success")
+
+    def _on_dodge_motion_triggered(self):
+        """闪避动作音: 只通知任务"闪避真的触发了", 不产生任何动作."""
+        self._notify_task_dodge_motion()
+
+    def _notify_task_dodge_motion(self):
+        """Runs on the listener thread, so the task handler must be non-blocking."""
+        trigger = self._trigger
+        task = trigger.task if trigger else None
+        handler = getattr(task, "on_dodge_motion_sound", None)
+        if handler is None:
+            return
+        try:
+            handler()
+        except Exception as e:
+            logger.error("Dodge motion handler error", e)
+
+    def discard_pending_action(self):
+        """丢弃还没执行的待处理动作(调用方要自己接管时用)."""
+        with self._context_lock:
+            if self._pending_action is None:
+                return False
+            self._pending_action = None
+            logger.info("Sound pending action discarded")
+        self.clear_priority()
+        return True
 
     def execute_pending_action(self, expected_action=ACTION_UNSET, expected_task=ACTION_UNSET):
         with self._context_lock:
@@ -397,6 +433,7 @@ class SoundCombatContext:
         dodge_threshold: float,
         counter_threshold: float,
         dodge_success_threshold: float = 0.3,
+        dodge_motion_threshold: float = 0.25,
     ):
         with self._context_lock:
             self._pending_config = (
@@ -405,6 +442,7 @@ class SoundCombatContext:
                 dodge_threshold,
                 counter_threshold,
                 dodge_success_threshold,
+                dodge_motion_threshold,
             )
             self._enable_sound_trigger = enable
             self._dodge_all_attacks = dodge_all_attacks
@@ -412,6 +450,7 @@ class SoundCombatContext:
                 self._listener.threshold = dodge_threshold
                 self._listener.counter_attack_threshold = counter_threshold
                 self._listener.dodge_success_threshold = dodge_success_threshold
+                self._listener.dodge_motion_threshold = dodge_motion_threshold
 
     def _is_computation_required(self) -> bool:
         if not self._enable_sound_trigger:

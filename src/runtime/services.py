@@ -98,6 +98,10 @@ class RuntimeServices:
             dodge_success_sample_path=get_path_relative_to_exe(
                 "assets", "sounds", "dodge_success.wav"
             ),
+            dodge_motion_sample_paths=[
+                get_path_relative_to_exe("assets", "sounds", f"dodge_motion_{index}.wav")
+                for index in (1, 2, 3)
+            ],
         )
         if self._stop_event.is_set():
             context.shutdown()
