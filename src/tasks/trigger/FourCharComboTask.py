@@ -12,8 +12,9 @@ from src.char.Daffodill import Daffodill
 from src.char.Iroi import Iroi
 from src.char.Sakiri import Sakiri
 from src.char.Zankou import Zankou
-from src.combat.BaseCombatTask import BaseCombatTask, NotInCombatException
+from src.combat.BaseCombatTask import BaseCombatTask, NotInCombatException, cd_regex
 from src.Labels import Labels
+from src.utils import game_filters as gf
 
 logger = Logger.get_logger(__name__)
 
@@ -107,6 +108,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     SOUND_SUCCESS_CLICK_DOWN = 0.08
     SOUND_SUCCESS_WAIT = 0.18
     SCRIPT_TICK = 0.05
+
+    # 必须与 BaseCombatTask.refresh_cd() 里的 OCR 区域保持一致
+    CD_OCR_BOX = (0.8594, 0.8847, 0.9578, 0.9139)
 
     ACTION_LOG_PATH = os.path.join("logs", "four_combo_actions.log")
 
@@ -800,12 +804,44 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             raise_if_not_found=False,
         ):
             return True
+        self._dump_q_cd_state("q_not_ready")
         logger.warning(
             f"{char} ultimate not ready, skip cast (lit={self._q_button_lit()}, "
             f"cd={self.get_cd('ultimate'):.2f}, "
             f"current={self.get_current_char(raise_exception=False)})"
         )
         return False
+
+    def _dump_q_cd_state(self, tag):
+        """CD 判定异常时把整帧 + 技能区 OCR 明细落盘, 用于确认是不是误读.
+
+        截图写 logs/(本地生成物, 不提交); 日志里带 OCR 原始文本和坐标,
+        这样能判断读到的数字到底来自 E 图标还是 Q 图标。
+        """
+        try:
+            os.makedirs("logs", exist_ok=True)
+            path = os.path.join(
+                "logs", f"four_combo_{tag}_{time.strftime('%Y%m%d_%H%M%S')}.png"
+            )
+            frame = self.frame
+            if frame is not None:
+                cv2.imwrite(path, frame)
+                bar = self.box_of_screen(0.78, 0.84, 1.0, 0.96).crop_frame(frame)
+                if bar is not None and bar.size:
+                    cv2.imwrite(path[:-4] + "_cdbar.png", bar)
+            texts = self.ocr(
+                *self.CD_OCR_BOX,
+                frame_processor=gf.isolate_text_to_black,
+                match=cd_regex,
+            )
+            detail = [f"{t.name}@({t.x},{t.y})" for t in (texts or [])]
+            logger.warning(
+                f"four combo q cd dump [{tag}] saved={path} "
+                f"ocr={detail} cds={self.cds} "
+                f"current={self.get_current_char(raise_exception=False)}"
+            )
+        except Exception as e:
+            logger.error(f"four combo q cd dump failed {e}")
 
     def _q_wait_attack(self):
         """等 Q 就绪期间继续普攻, 避免角色在场上站着发呆.
@@ -942,6 +978,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 if remaining > 0:
                     previous = remaining
                 self.sleep(self.SCRIPT_TICK)
+        self._dump_q_cd_state("cd_ticking_timeout")
         logger.warning("wait cd ticking timeout")
         return False
 
