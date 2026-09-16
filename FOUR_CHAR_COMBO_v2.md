@@ -49,15 +49,19 @@
 
 > **长按上限绝对不许回到 2s。** 金 E 在 ~0.67~0.8s 出现（手动实测长按 0.87~0.99s 是"看到变金后再松手"），到 0.9s 还没金就是异常。
 
-**长按没出金 E 时分流**（`_zankou_hold_with_recovery`，顺序很重要）：
-
-1. **先重按**（最多 `COMBO_HOLD_RETRY_MAX=3` 次，每次之间 `COMBO_HOLD_REPRESS_GAP=0.1s`）：切人/入场动画期间按住不生效——实测切人确认后按下、攻击要到动画结束才出来，金 E 就落在 0.9s 上限之后（`logs/four_combo_combo_anomaly_20260916_183648.png` 里能看到那一刻 E 图标已经变金、角色正在打伤害，但 0.9s 上限刚好先到了）。动画结束后重新按下，~0.7s 就正常变金。
-2. 重按到头仍没出金，再看是否掉血：
+**长按没出金 E 时分流**（`_zankou_hold_with_recovery`，**不重按**——重按会白等 1~2s，限时关卡等于失败）：
 
 | 情况 | 判据 | 处理 |
 |---|---|---|
-| 掉血了 | 长按期间**多次采样**血条像素数，出现下降 | 大概率被打断 → `_dodge_until_triggered()`：连按 shift 直到听到**闪避动作音**（见 1.6），确认闪避真的触发后重新从第 1 步开始（最多 `COMBO_DODGE_RETRY_MAX=3` 次闪避） |
-| 没掉血 | 全程没看到血条下降 | 可控状态下重按多次长按不出金 E 不可能 → `_raise_combo_anomaly()`：落盘现场 → `disable()` 停任务 → 抛 `ZankouComboAnomaly` |
+| 掉血了 | 长按期间**多次采样**血条像素数，出现下降 | 大概率被打断 → `_dodge_until_triggered()`：连按 shift 直到听到**闪避动作音**（见 1.6），确认闪避真的触发后再重打长按（最多 `COMBO_DODGE_RETRY_MAX=3` 轮） |
+| 没掉血 | 全程没看到血条下降 | 可控状态下长按不出金 E 不可能 → `_raise_combo_anomaly()`：落盘现场 → `disable()` 停任务 → 抛 `ZankouComboAnomaly` |
+
+**入场技（必须提前预测，否则长按会落在动画里）**：游戏机制 —— **满环合**的角色切到**六边形环上相邻属性**的角色时，新上场的角色触发入场技，期间无法控制，按住不生效。
+
+- 环（`BaseCombatTask.element_ring`，已存在）：`White → Green → Red → Purple → Blue → Yellow → White`。对应关系：光=White、**灵=Green（伊洛伊）**、**咒=Red（残虹/早雾）**、**暗=Purple（达芙蒂尔）**、魂=Blue、相=Yellow。所以**咒与灵、暗相邻**，达芙蒂尔/伊洛伊满环合切残虹 → 残虹入场技。
+- 判据：`_switch_triggers_entry_skill()` = 上一任 `is_cycle_full()` **且** `_is_adjacent_element()`（环上相邻，含首尾环绕）。
+- 计时：`_entry_skill_until = 按下切人键的时刻 + ENTRY_SKILL_WAIT=1.1s`，`_hold_until_gold()` 开头会先 `sleep` 到该时刻再长按。手动实测（2 次：达芙蒂尔→残虹、伊洛伊→残虹）：**切人键 → 长按 = 1.09 / 1.12s**（长按 0.93 / 0.91s，然后单击 0.10s）。
+- 旧实现两个问题：① 只看 `is_cycle_full()` 不看属性相邻（不相邻的切换会白等）；② 从**切人确认**时刻起算 1.6s（确认本身有 0.3~1.3s 抖动，且 1.6 比实测的 1.1 多等 0.5s）。
 
 - 血条必须**连续采样**（`_health_pixels()` = 当前角色血条红条掩码的非零像素数），不能只取首尾两次：伊洛伊大招会在后台回血，只取两次会出现"采样→掉血→回血→采样"而看不到掉血。判据是"相对历史峰值的下降" `> max(HEALTH_DROP_MIN_PIXELS=4, peak*HEALTH_DROP_RATIO=0.02)`。
 - 一帧血条都没取到（`health_samples == 0`）时无法证明"没掉血"，按"被打断"走闪避重试，不抛异常。
@@ -67,7 +71,7 @@
 
 ### 1.4 残虹双 Q（最终实现）
 
-1. 切残虹后先 `_wait_in_team(ENTRY_SKILL_WAIT=1.6s)` 等脱离切人/入场动画；
+1. 切残虹后先 `_wait_in_team(timeout=ENTRY_SKILL_WAIT)` 等脱离切人/入场动画（入场技的等待由 `_switch_to` 预测，见 1.3）；
 2. **连按 Q**（`send_ultimate_key` 每 ~`Q_PRESS_INTERVAL=0.12s`，冷却中按键被忽略）；
 3. `_press_q_through_animations()` 依次确认 **4 个阶段**：`enter1`（第 1 段进特写）→ `exit1` → `enter2`（第 2 段进特写）→ `exit2`。每阶段要求 `is_in_team()` 稳定保持 `ANIMATION_STABLE_TIME=0.3s` 才算确认，防止特写期间状态抖动把动画数错；
 4. `_wait_double_q_recovery(stage)`：**两个条件必须同时成立**才交回上层做二连（长按）：
@@ -109,7 +113,7 @@
 
 - 环合值每个角色独立；角色不在场时不变；只在残虹在场时读残虹的。
 - 残虹环合满必须**直接由残虹切伊洛伊**（唯一例外：开局那次残虹切达芙蒂尔）。
-- **入场技**：切人前读**上一任** `is_cycle_full()`；满则设 `ENTRY_SKILL_WAIT=1.6s` 入场窗口。入场技期间按 Q 无效 → 放 Q 要连按；若新上场是**残虹**，先等 1.6s 再长按。
+- **入场技**：见 1.3。切人前读**上一任** `is_cycle_full()` **且** 属性在 `element_ring` 上相邻，才设 `ENTRY_SKILL_WAIT=1.1s`（从按下切人键算起）入场窗口。入场技期间按 Q 无效 → 放 Q 要连按；若新上场是**残虹**，`_hold_until_gold()` 会先等到 1.1s 再长按。
 
 ### 1.8 其他约定
 
@@ -185,12 +189,12 @@
 ```
 COMBO_HOLD_MIN=0.67  COMBO_HOLD_MAX=0.9  COMBO_POLL_INTERVAL=0.05
 COMBO_RELEASE_GAP=0.06  COMBO_CLICK_GAP=0.05  GOLD_THRESHOLD=0.7
-COMBO_DODGE_RETRY_MAX=3  COMBO_HOLD_RETRY_MAX=3  COMBO_HOLD_REPRESS_GAP=0.1
+COMBO_DODGE_RETRY_MAX=3
 HEALTH_DROP_RATIO=0.02  HEALTH_DROP_MIN_PIXELS=4
 DODGE_RETRY_TIMEOUT=3.0  DODGE_RETRY_INTERVAL=0.15
 DAFFODILL_FIELD_TIME=1.5  PAD_FIELD_TIME=1.5  IROI_FUNNEL_POST_SLEEP=0.3
 Q_READY_TIMEOUT=5.0  Q_REGISTER_TIMEOUT=3.0  Q_DOUBLE_TIMEOUT=8.0  Q_PRESS_INTERVAL=0.12
-ENTRY_SKILL_WAIT=1.6  SWITCH_SETTLE_TIME=0.1  SUPPRESS_SWITCH_CLICK=True  SWITCH_CONFIRM_TIMEOUT=3.0
+ENTRY_SKILL_WAIT=1.1  SWITCH_SETTLE_TIME=0.1  SUPPRESS_SWITCH_CLICK=True  SWITCH_CONFIRM_TIMEOUT=3.0
 SKILL_REGISTER_TIMEOUT=2.0  DAFFODILL_SKILL_REGISTER_TIMEOUT=0.5
 CYCLE_BAR_VISIBLE_MIN_PIXELS=20  IROI_FUNNEL_ANIMATION_TIMEOUT=5.0
 CONTROLLABLE_TIMEOUT=10.0  ZANKOU_Q_READY_WINDOW=2.0
@@ -309,7 +313,7 @@ ACTION_LOG_PATH=logs/four_combo_actions.log
   - 看 logger 名是为了让这些模块自身的日志也能进来（否则形如 `Zankou skill registered` 这种不含关键词的正文会被漏掉）。
   - 排查"敌人死了但还卡在战斗状态"：搜 `four char combo combat state [tag]`，这行由 `_maybe_log_combat_state()` 每 `COMBAT_STATE_LOG_INTERVAL=2s` 打印一次，含 `in_combat / scene_cache / uncertain / miss / boss_flag / is_boss / lv / target / health_bar`，一眼看出是哪个信号把战斗状态按住了。
   - 异常/失败现场：`_dump_q_cd_state(tag)` 会把整帧 + 右下技能条裁剪写到 `logs/four_combo_<tag>_<时间>.png`，并在日志里打一行 `four combo q cd dump [tag] saved=... ocr=[名字@(x,y)...] cds={...} current=...`。tag 取值：`q_not_ready` / `combo_ready_timeout` / `combo_anomaly`。
-  - 金 E 长按结果：`zankou gold E detected, conf=...` / `zankou gold E not detected, best conf=... (hold=0.9s, health_samples=N, health_peak=P, damaged=True/False)`；分流日志：`zankou gold E missing, press again (i/3)` / `zankou gold E missing but damaged, dodge then retry (i/3)` / `dodge retry: dodge motion heard, dodge triggered` / `dodge retry: perfect dodge heard, ...` / `four char combo anomaly: ...`。
+  - 金 E 长按结果：`zankou gold E detected, conf=...` / `zankou gold E not detected, best conf=... (hold=0.9s, health_samples=N, health_peak=P, damaged=True/False)`；分流日志：`(removed)` / `zankou gold E missing but damaged, dodge then retry (i/3)` / `dodge retry: dodge motion heard, dodge triggered` / `dodge retry: perfect dodge heard, ...` / `four char combo anomaly: ...`。
   - 声音：`Dodge MOTION TRIGGERED! score: ...`（闪避动作音命中）、`Audio monitoring - ... dodge_motion_score: ...`（每 20s 一次）。
   - `BaseCombatTask.ultimate_available()` 里的 `char:N, ult:..., conf:...` 已用 `run_with_interval(..., 1, action_name=f"ultimate_available_log_{index}")` 节流到**每角色 1 条/秒**。它原先每轮无条件打印，而 `Iroi._wait_ultimate_unfreeze` 在特写期间以 ~250 次/秒轮询它，会把日志刷爆。加日志时注意别在轮询热路径里直接 `log_info`。
 - **键鼠日志**：`logs/four_combo_actions.log`。格式 `HH:MM:SS.mmm +间隔s [phase] 操作`；每次启动写 `==== session YYYY-MM-DD HH:MM:SS ====`。phase 取值：`precombat_gold_e` / `precombat_daffodill_q` / `opener` / `loop` / `pad_until_q` / `zankou_gold_e` / `zankou_enter` / `zankou_combo` / `zankou_double_q` / `zankou_cycle_full` / `iroi_funnel` / `daffodill_window` / `sound_success` / `sound_success_interrupt`。本地生成物，不要提交。

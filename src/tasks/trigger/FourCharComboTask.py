@@ -99,8 +99,6 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     COMBO_RELEASE_GAP = 0.06
     COMBO_CLICK_GAP = 0.05
     COMBO_DODGE_RETRY_MAX = 3
-    COMBO_HOLD_RETRY_MAX = 3
-    COMBO_HOLD_REPRESS_GAP = 0.1
     HEALTH_DROP_RATIO = 0.02
     HEALTH_DROP_MIN_PIXELS = 4
     DODGE_RETRY_TIMEOUT = 3.0
@@ -114,7 +112,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     Q_REGISTER_TIMEOUT = 3.0
     Q_DOUBLE_TIMEOUT = 8.0
     Q_PRESS_INTERVAL = 0.12
-    ENTRY_SKILL_WAIT = 1.6
+    ENTRY_SKILL_WAIT = 1.1
     SWITCH_SETTLE_TIME = 0.1
     SUPPRESS_SWITCH_CLICK = True
     SWITCH_CONFIRM_TIMEOUT = 3.0
@@ -671,47 +669,34 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         return False
 
     def _zankou_hold_with_recovery(self, interrupt_event=None):
-        """长按轮询金 E; 失败时先重按, 再按"是否掉血"分流, 返回最终结果.
+        """长按轮询金 E; 没出金 E 时按"是否掉血"分流, 返回最终结果.
 
-        - 一次长按没出金 E 会先**重按几次**: 切人/入场动画期间按住不生效 (实测按下的那一刻
-          还在切人动画里, 攻击要到动画结束才出来, 金 E 就落在 0.9s 上限之后), 动画结束后
-          重新按下才会正常在 ~0.7s 变金;
-        - 重按仍不出金: 掉血 = 大概率被打断 -> 连按 shift 直到闪避真的触发再重打;
-                       没掉血 = 状态异常 -> 抛异常停任务。
+        **不重按**: 长按起点由 `_switch_to` 的入场技预测 (`_entry_skill_until`) 保证;
+        重按会白等 1~2s, 限时关卡里等于直接失败。
+
+        - 掉血 = 大概率被打断 -> 连按 shift 直到闪避真的触发, 然后重打长按;
+        - 没掉血 = 状态异常 -> 抛异常停任务。
         """
         damaged = False
-        press = 0
-        dodges = 0
-        while True:
-            press += 1
+        for dodges in range(1, self.COMBO_DODGE_RETRY_MAX + 1):
             result, press_damaged = self._hold_until_gold(interrupt_event=interrupt_event)
             damaged = damaged or press_damaged
             if result is not HoldResult.NO_GOLD:
                 return result
-            if damaged:
-                dodges += 1
-                if dodges > self.COMBO_DODGE_RETRY_MAX:
-                    self._raise_combo_anomaly(
-                        f"zankou gold E still missing after {self.COMBO_DODGE_RETRY_MAX} dodges"
-                    )
-                logger.warning(
-                    f"zankou gold E missing but damaged, dodge then retry "
-                    f"({dodges}/{self.COMBO_DODGE_RETRY_MAX})"
-                )
-                if not self._dodge_until_triggered():
-                    return HoldResult.HANDLED
-                damaged = False
-                press = 0
-                continue
-            if press >= self.COMBO_HOLD_RETRY_MAX:
+            if not damaged:
                 self._raise_combo_anomaly(
-                    f"zankou gold E missing while not damaged after "
-                    f"{press} presses (hold {self.COMBO_HOLD_MAX}s each)"
+                    f"zankou gold E missing while not damaged (hold {self.COMBO_HOLD_MAX}s)"
                 )
             logger.warning(
-                f"zankou gold E missing, press again ({press}/{self.COMBO_HOLD_RETRY_MAX})"
+                f"zankou gold E missing but damaged, dodge then retry "
+                f"({dodges}/{self.COMBO_DODGE_RETRY_MAX})"
             )
-            self.sleep(self.COMBO_HOLD_REPRESS_GAP)
+            if not self._dodge_until_triggered():
+                return HoldResult.HANDLED
+            damaged = False
+        self._raise_combo_anomaly(
+            f"zankou gold E still missing after {self.COMBO_DODGE_RETRY_MAX} dodges"
+        )
 
     def _dodge_until_triggered(self):
         """连按闪避(shift)直到听到"闪避动作音", 确认闪避真的触发了.
@@ -1281,14 +1266,43 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         if self.get_current_char(raise_exception=False) is not char:
             self._switch_to(char)
 
+    def _is_adjacent_element(self, char_a, char_b):
+        """两个角色的属性在六边形环上是否相邻 (`element_ring` 的邻居, 含首尾环绕).
+
+        游戏机制: **满环合**的角色切到**环上相邻属性**的角色时, 新上场的角色会触发入场技,
+        期间无法控制。例如残虹/早雾=咒(Red)、伊洛伊=灵(Green)、达芙蒂尔=暗(Purple),
+        咒与灵、暗相邻, 所以满环合的达芙蒂尔/伊洛伊切残虹会触发残虹的入场技。
+        """
+        index = self.element_ring_index
+        a = getattr(char_a, "element", None)
+        b = getattr(char_b, "element", None)
+        if a is None or b is None or a == b or a not in index or b not in index:
+            return False
+        delta = abs(index[a] - index[b])
+        return delta == 1 or delta == len(self.element_ring) - 1
+
+    def _switch_triggers_entry_skill(self, current, char):
+        """上一任满环合 + 属性相邻 -> 新角色会放入场技."""
+        full = bool(current.is_cycle_full())
+        adjacent = self._is_adjacent_element(current, char)
+        if full and adjacent:
+            logger.info(
+                f"four combo entry skill expected: {current}({current.element}) -> "
+                f"{char}({char.element}), cycle_ratio={self.cycle_ratio():.2f}, "
+                f"wait {self.ENTRY_SKILL_WAIT}s"
+            )
+        return full and adjacent
+
     def _switch_to(self, char):
         current = self.get_current_char(raise_exception=False)
         if current is char:
             return
-        entry_skill = current is not None and bool(self.is_cycle_full())
+        entry_skill = current is not None and self._switch_triggers_entry_skill(current, char)
+        # 入场技计时从"按下切人键"算起 (手动实测: 切人键 -> 长按 = 1.09/1.12s)
+        started = time.time()
         self._wait_in_team(timeout=self.CONTROLLABLE_TIMEOUT)
         self._confirm_switch(char, current)
-        self._entry_skill_until = time.time() + self.ENTRY_SKILL_WAIT if entry_skill else 0.0
+        self._entry_skill_until = started + self.ENTRY_SKILL_WAIT if entry_skill else 0.0
 
     def _confirm_switch(self, char, current):
         """等脱离动画后重按切人键, 直到图像确认目标角色上场; 不做额外点击.
