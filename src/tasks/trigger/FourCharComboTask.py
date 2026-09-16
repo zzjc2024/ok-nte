@@ -594,11 +594,15 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         """连按 E 直到技能进入 CD(已释放); 观察到 CD 即可切人, 不等动画收尾.
 
         E 释放后不打断动作, 所以只要 CD 出现就认为放出去了, 立即返回便于切人。
+        大招/特写期间按键不生效(实测早雾放完 Q 后 `in_team=False`, E 连按 2s 全废),
+        所以先等脱离特写、可控了再按 E。
         """
         if timeout is None:
             timeout = self.SKILL_REGISTER_TIMEOUT
         if char.has_cd("skill"):
             return True
+        if not self.is_in_team():
+            self._wait_in_team(timeout=self.CONTROLLABLE_TIMEOUT)
         start = time.time()
         deadline = start + timeout
         last_log = -1.0
@@ -614,7 +618,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                         f"cd={self.get_cd('skill'):.2f} "
                         f"in_team={bool(self.is_in_team())}"
                     )
-                if char.skill_available():
+                if self.is_in_team() and char.skill_available():
                     char.send_skill_key(down_time=0.05)
                 self.sleep(0.05)
                 if char.has_cd("skill"):
@@ -1195,21 +1199,30 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         )
 
     def _wait_controllable(self, char, was_lit):
-        """可控信号: 冷却数字开始跳 或 Q 按钮由亮变灭."""
+        """可控信号: Q 冷却**原始数字**开始变小; 没有冷却数字时才退回"Q 按钮由亮变灭".
+
+        必须用原始 OCR 数字: `get_cd()` 会减去"自快照以来的时间", 数字挂在屏幕上就一直变小,
+        判断不出游戏里冷却是否真的开始跳(见 `_raw_ultimate_cd`)。
+        **图标由亮变灭不能当主判据**: 实测大招一按下去图标就变灭, 但此时还在大招特写里
+        (早雾放完 Q 后 `in_team=False`, E 连按 2s 全废), 所以只在读不到冷却数字时才用它兜底。
+        """
         start = time.time()
         previous = None
         with self.skip_sleep_checks() as skip:
             skip.check_combat = True
             while time.time() - start < self.CONTROLLABLE_TIMEOUT:
-                if was_lit and not self._q_button_lit():
-                    return True
-                remaining = self.get_cd("ultimate")
-                if remaining > 0 and previous is not None and remaining < previous - 0.001:
-                    return True
+                remaining = self._raw_ultimate_cd()
                 if remaining > 0:
+                    if previous is not None and remaining < previous - 0.001:
+                        return True
                     previous = remaining
+                elif was_lit and not self._q_button_lit():
+                    return True
                 self.sleep(self.SCRIPT_TICK)
-        logger.warning(f"wait controllable timeout {char}")
+        logger.warning(
+            f"wait controllable timeout {char} "
+            f"(raw cd={self._raw_ultimate_cd():.2f}, in_team={bool(self.is_in_team())})"
+        )
         return False
 
     def _raw_ultimate_cd(self):

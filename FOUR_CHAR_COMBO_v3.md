@@ -66,8 +66,8 @@ White → Green → Red → Purple → Blue → Yellow → White
 
 ### 3.3 其他约定
 
-- **可控** = 冷却数字开始跳 **或** Q 图标由亮变灭（原本就灭的不算）。
-- **E 切人规则**：所有角色点 E 后，观察到 E 进入 CD（已释放）即可立即切人，不必等动画收尾。
+- **可控** = Q 冷却**原始 OCR 数字**开始变小（首选）；读不到冷却数字时才退回"Q 图标由亮变灭"。**不能用 `get_cd()`**（会随时间漂移，数字挂在屏幕上就一直变小）；**也不能拿"图标变灭"当主判据** —— 实测大招一按下去图标就变灭，但人还在大招特写里（`in_team=False`），按键不生效。
+- **E 切人规则**：所有角色点 E 后，观察到 E 进入 CD（已释放）即可立即切人，不必等动画收尾。按 E 前先 `_wait_in_team`（特写期间按了也白按，实测早雾放完 Q 后 E 连按 2s 全废）。
 - 固定 1~4 号位；取消"检测四人是否都在队里"的保险。
 - 切人确认后先停 0.1s（`SWITCH_SETTLE_TIME`）再长按。
 
@@ -217,7 +217,7 @@ White → Green → Red → Purple → Blue → Yellow → White
 
 **已知限制（暂不改）**
 - 双 Q 的 `exit2` 基本确认不了（超时 8s < 全程 ~11s），二连时机不依赖它。
-- 早雾 E 经常放不出来（日志 `Sakiri skill not registered within 2.0s`，`lit=0` / `in_team=False`）。根因多半是她刚放完 Q 还在大招特写里（`in_team=False`），而 `_skill_until_registered` 只等 2s → **待改**：先等可控再点 E。
+- 早雾 E 经常放不出来（日志 `Sakiri skill not registered within 2.0s`，`lit=0` / `in_team=False`）。根因是她刚放完 Q 还在大招特写里（`in_team=False`），而按键在特写期间不生效。**已修**：`_wait_controllable` 改成等 Q 冷却**原始数字**开始变小（"图标由亮变灭"只作没有冷却数字时的兜底 —— 实测大招一按下去图标就变灭，但人还在特写里），`_skill_until_registered` 也先 `_wait_in_team` 再按 E，特写期间不浪费按键。
 - 切人确认**两个方向都会错**：漏判（`four combo switch not confirmed, want X, got -1`）和误判（21:01 早雾→残虹 误报 confirmed，见 §5.1）。误判已由 `_verify_current` + 二连前的复查兜住；漏判仍靠重按 3s 兜。
 
 ---

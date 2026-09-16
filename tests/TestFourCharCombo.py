@@ -73,6 +73,44 @@ class TestFourCharCombo(unittest.TestCase):
 
         self.task._raise_combo_anomaly.assert_called_once()
 
+    def test_wait_controllable_needs_raw_cd_to_tick(self):
+        # 实测 bug: 大招一按下去 Q 图标就变灭, 但此时还在特写里(in_team=False),
+        # 早雾的 E 连按 2s 全废。有冷却数字时必须等原始数字真的变小。
+        self.task.CONTROLLABLE_TIMEOUT = 0.4
+        self.task._q_button_lit = Mock(return_value=False)
+        self.task._raw_ultimate_cd = Mock(return_value=20.0)
+        self.task.is_in_team = Mock(return_value=False)
+
+        self.assertFalse(self.task._wait_controllable(self.task.zankou, was_lit=True))
+
+    def test_wait_controllable_returns_when_raw_cd_ticks(self):
+        start = time.time()
+
+        def raw_cd():
+            return 20.0 if time.time() - start < 0.15 else 19.8
+
+        self.task.CONTROLLABLE_TIMEOUT = 1.0
+        self.task._q_button_lit = Mock(return_value=False)
+        self.task._raw_ultimate_cd = Mock(side_effect=raw_cd)
+
+        self.assertTrue(self.task._wait_controllable(self.task.zankou, was_lit=True))
+
+    def test_skill_waits_for_team_before_pressing_e(self):
+        # 特写期间(in_team=False)不能按 E
+        char = Mock()
+        char.has_cd = Mock(side_effect=[False, True])
+        char.skill_available = Mock(return_value=True)
+        char.send_skill_key = Mock()
+        self.task.is_in_team = Mock(return_value=False)
+        self.task._wait_in_team = Mock()
+        self.task.box_highlighted = Mock(return_value=0)
+        self.task.get_cd = Mock(return_value=0.0)
+
+        self.assertTrue(self.task._skill_until_registered(char))
+
+        char.send_skill_key.assert_not_called()
+        self.task._wait_in_team.assert_called_once()
+
     def test_no_gold_but_wrong_char_reswitches_instead_of_anomaly(self):
         # 实测 bug: 切人高亮误报 confirmed, 场上其实还是早雾 -> 不该抛异常停任务
         self.task._hold_until_gold = Mock(
