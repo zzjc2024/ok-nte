@@ -264,8 +264,8 @@ class TestFourCharCombo(unittest.TestCase):
         self.assertEqual(task._entry_skill_until, 0.0)  # 只消费一次
         task._press_q_ready.assert_called_once()
 
-    def test_opener_aborts_when_critical_switch_fails(self):
-        # 开场切人重试后仍失败(入场技期间检测失明): 中止开场交回主循环, 不在错角色上空转
+    def test_opener_raises_when_critical_switch_fails(self):
+        # 开场切人重试后仍失败: 不允许跳步, 落盘现场后直接抛异常停任务
         task = self.task
         task._suppress_combat_check = False
         task._opener_gold_e_done = True
@@ -277,13 +277,12 @@ class TestFourCharCombo(unittest.TestCase):
         task._zankou_double_q = Mock()
         task._zankou_combo = Mock()
 
-        task._opener()
+        with self.assertRaises(ZankouComboAnomaly):
+            task._opener()
 
         task._switch_confirmed.assert_called_once_with(task.daffodill)
         task._cast_q.assert_not_called()
         task._zankou_double_q.assert_not_called()
-        self.assertFalse(task._opener_gold_e_done)  # 开场记忆已重置
-        self.assertFalse(task._precombat_daffodill_q_done)
 
     def test_opener_switch_succeeded_before_cast_q(self):
         # 开场每步: 先切人确认, 再在确认过的角色上放技能

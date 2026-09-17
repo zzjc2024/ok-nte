@@ -463,7 +463,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         切人一律走 `_switch_confirmed`(整体重试 + 图像复查): 入场技动画期间当前角色
         检测可能整段失明(2026-09-17 18:00 实机: 切早雾已生效, 检测却连续 3s 报
         index=1), 单次 `_switch_to` 失败就裸继续会让后面每一步都在错的角色上空转。
-        任一关键切人重试后仍失败 -> 中止开场, 交回主循环兜底。
+        任一关键切人重试后仍失败 -> 落盘现场 + 停任务 + 抛异常:
+        **开场流程不允许跳步**(用户明确要求), 宁可停下来人工看。
         """
         logger.info("four char combo opener start")
         self._set_action_phase("opener")
@@ -476,34 +477,34 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             aborted = self._opener_combat_lost("gold_e")
 
             if not aborted and not self._switch_confirmed(self.daffodill):
-                aborted = self._abort_opener("daffodill")
+                self._raise_combo_anomaly("opener switch to daffodill failed after retries")
             if not aborted:
                 if not self._precombat_daffodill_q_done:
                     self._cast_q(self.daffodill)
                 aborted = self._opener_combat_lost("daffodill")
 
             if not aborted and not self._switch_confirmed(self.iroi):
-                aborted = self._abort_opener("iroi")
+                self._raise_combo_anomaly("opener switch to iroi failed after retries")
             if not aborted:
                 self._skill_until_registered(self.iroi)
                 aborted = self._opener_combat_lost("iroi")
 
             if not aborted and not self._switch_confirmed(self.sakiri):
-                aborted = self._abort_opener("sakiri")
+                self._raise_combo_anomaly("opener switch to sakiri failed after retries")
             if not aborted:
                 self._cast_q(self.sakiri)
                 self._skill_until_registered(self.sakiri)
                 aborted = self._opener_combat_lost("sakiri")
 
             if not aborted and not self._switch_confirmed(self.zankou):
-                aborted = self._abort_opener("zankou")
+                self._raise_combo_anomaly("opener switch to zankou failed after retries")
             if not aborted:
                 self._zankou_double_q()
                 self._zankou_combo()
                 aborted = self._opener_combat_lost("zankou_double_q")
 
             if not aborted and not self._switch_confirmed(self.iroi):
-                aborted = self._abort_opener("iroi_funnel")
+                self._raise_combo_anomaly("opener switch to iroi (funnel) failed after retries")
             if not aborted:
                 self._iroi_q_funnel()
                 aborted = self._opener_combat_lost("iroi_funnel")
@@ -513,19 +514,13 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
 
         if aborted:
             logger.warning(
-                "four char combo opener aborted (combat ended or switch failed), "
-                "reset precombat memory"
+                "four char combo opener aborted (combat ended), reset precombat memory"
             )
             self._opener_gold_e_done = False
             self._precombat_daffodill_q_done = False
             return
         if target is self.daffodill:
             self._daffodill_until_cycle_full()
-
-    def _abort_opener(self, step):
-        """关键切人重试后仍失败: 中止开场交回主循环, 比在错的角色上空转好."""
-        logger.warning(f"four combo opener abort: switch to {step} failed after retries")
-        return True
 
     def _enemy_present(self):
         """便宜的"敌人还在"信号: boss / Lv / 目标 / 红血条.
