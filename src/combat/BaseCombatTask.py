@@ -1052,48 +1052,51 @@ class BaseCombatTask(CharElementUIMixin, CombatCheck):
         return ret
 
     def cycle_ratio(self) -> float:
-        """当前角色环合条的填充比例 (0.0~1.0+).
+        """环合条顶部是否已经填满 (0.0 ~ 1.0).
 
-        取环合环 12 点方向与 6 点方向的白像素密度之比; 未满时 12 点方向有缺口,
-        所以比值随填充升高。下半部分全黑时返回 0.0。
+        环合是**像倒水一样从下往上**涨的, 未满时缺口一定在 12 点方向, 所以只需要看
+        环带最上面一小段(12 点 +-12 度)是不是白的。
+
+        旧实现取"12 点 / 6 点白像素密度比", 有两个问题: 环合过半后上下两点都白,
+        比值饱和在 ~1.0 分不出 50% 和 100%; 而 `>0.9` 才算满又要求两点密度几乎相等,
+        线宽/抗锯齿略有差异就误判成未满(实测 2026-09-17 因此漏掉一次入场技预测)。
+        几何实测(2560x1440, `tools\\ring_detect.cmd`): 环在半径 28.7~31.3px, 环厚 ~2.6px。
         """
         img = self.box_of_screen_scaled(
             2560, 1440, 944, 1316, width_original=66, height_original=66
         ).crop_frame(self.frame)
+        return self._cycle_top_white_fraction(img)
+
+    CYCLE_TOP_ANGLE_SPAN = 12.0  # 只看 12 点方向 +-12 度
+    CYCLE_RING_INNER = 0.84  # 环带半径范围 / 外半径(实测 28.7~31.3 对 外半径 ~31.3)
+    CYCLE_RING_OUTER = 0.99
+    CYCLE_WHITE_LEVEL = 200
+
+    @classmethod
+    def _cycle_top_white_fraction(cls, img) -> float:
+        """环带最上面一段里, 有多少个角度的环带是白的 (0.0 ~ 1.0).
+
+        每个角度在环带半径范围内取最大值, 所以对半径估计的误差不敏感;
+        暗环白度约 40, 白环约 238, 阈值 200 分得很干净。
+        """
         h, w = img.shape[:2]
-        side = h
-
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-
-        mask = np.zeros((h, w), dtype=np.uint8)
-        center = (w // 2, h // 2)
-        outer_r = side // 2
-        inner_r = int(outer_r * (1 - 0.15))
-        cv2.circle(mask, center, outer_r, 255, -1)
-        cv2.circle(mask, center, inner_r, 0, -1)
-
-        ring_only = cv2.bitwise_and(thresh, thresh, mask=mask)
-
-        roi_size = int(side * 0.1)
-        margin = int(side * 0.02)
-
-        top_roi = ring_only[
-            margin : margin + roi_size, (w // 2 - roi_size // 2) : (w // 2 + roi_size // 2)
-        ]
-        bottom_roi = ring_only[
-            (h - margin - roi_size) : (h - margin),
-            (w // 2 - roi_size // 2) : (w // 2 + roi_size // 2),
-        ]
-
-        top_density = int(np.sum(top_roi == 255))
-        bottom_density = int(np.sum(bottom_roi == 255))
-        if bottom_density == 0:
+        if h < 8 or w < 8:
             return 0.0
-        return top_density / bottom_density
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        center_x, center_y = w / 2.0, h / 2.0
+        outer_r = min(w, h) / 2.0
+        radii = np.arange(outer_r * cls.CYCLE_RING_INNER, outer_r * cls.CYCLE_RING_OUTER, 0.5)
+        if radii.size == 0:
+            return 0.0
+        span = cls.CYCLE_TOP_ANGLE_SPAN
+        angles = np.radians(np.arange(270.0 - span, 270.0 + span + 1e-9, 1.5))
+        xs = (center_x + np.outer(np.cos(angles), radii)).astype(np.float32)
+        ys = (center_y + np.outer(np.sin(angles), radii)).astype(np.float32)
+        samples = cv2.remap(gray, xs, ys, cv2.INTER_LINEAR)
+        return float((samples >= cls.CYCLE_WHITE_LEVEL).any(axis=1).mean())
 
     def is_cycle_full(self) -> bool:
-        return self.cycle_ratio() > 0.9
+        return self.cycle_ratio() > 0.5
 
 
     def walk_until_combat(
