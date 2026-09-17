@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 from src.combat.BaseCombatTask import SleepCheckSkip
 from src.tasks.trigger.FourCharComboTask import (
+    DodgeRetry,
     FourCharComboTask,
     HoldResult,
     ZankouComboAnomaly,
@@ -23,8 +24,12 @@ class TestFourCharCombo(unittest.TestCase):
         task._dodge_heard_at = 0.0
         task._holding = False
         task._dodge_success_heard = threading.Event()
+        task._dodge_motion_heard = threading.Event()
         task._alert_interrupt = threading.Event()
         task._last_zankou_combo_at = 0.0
+        task._last_dodge_was_perfect = False
+        task.send_key = Mock()
+        task.COMBO_DODGE_RETRY_MAX = 3
         task.sleep = Mock()
         task.mouse_down = Mock()
         task.mouse_up = Mock()
@@ -62,15 +67,90 @@ class TestFourCharCombo(unittest.TestCase):
 
         self.assertGreater(self.task._last_zankou_combo_at, 0.0)
 
-    def test_sound_success_on_other_char_does_not_stamp(self):
-        # 非残虹: 设计上就是主循环随后切残虹打二连, 不能把主循环那套跳掉
+    def test_sound_success_on_other_char_only_clicks(self):
+        # 非残虹: 只点左键触发闪避反击, 不强行切人, 也不接管主循环的二连
         self.task.get_current_char = Mock(return_value="Sakiri")
-        self.task._sound_immediate_reaction = Mock()
+        self.task._switch_to = Mock()
 
         self.task._sound_dodge_success_action()
 
+        self.task.click.assert_called_once()
+        self.task.send_key.assert_not_called()
+        self.task._switch_to.assert_not_called()
         self.assertEqual(self.task._last_zankou_combo_at, 0.0)
-        self.task._sound_immediate_reaction.assert_called_once()
+
+    def test_dodge_not_confirmed_retries_then_raises(self):
+        # 角色正被连击时闪不出来: 本轮只记日志继续再试, 几轮都不行才抛异常
+        self.task.COMBO_DODGE_RETRY_MAX = 3
+        self.task._hold_until_gold = Mock(return_value=(HoldResult.NO_GOLD, True))
+        self.task._dodge_until_triggered = Mock(return_value=DodgeRetry.NOT_TRIGGERED)
+
+        with self.assertRaises(ZankouComboAnomaly):
+            self.task._zankou_hold_with_recovery()
+
+        self.assertEqual(self.task._dodge_until_triggered.call_count, 3)
+
+    def test_dodge_triggered_after_damage_returns_gold(self):
+        self.task._hold_until_gold = Mock(
+            side_effect=[(HoldResult.NO_GOLD, True), (HoldResult.GOLD, False)]
+        )
+        self.task._dodge_until_triggered = Mock(return_value=DodgeRetry.TRIGGERED)
+
+        self.assertIs(self.task._zankou_hold_with_recovery(), HoldResult.GOLD)
+        self.assertEqual(self.task._dodge_until_triggered.call_count, 1)
+
+    def test_hold_marks_normal_dodge_not_perfect(self):
+        def find_one(*args, **kwargs):
+            self.task._dodge_heard_at = time.time() + 1
+            self.task._dodge_motion_heard.set()
+            return None
+
+        self.task.find_one = Mock(side_effect=find_one)
+
+        self.task._hold_until_gold()
+
+        self.assertFalse(self.task._last_dodge_was_perfect)
+
+    def test_hold_marks_perfect_dodge(self):
+        def find_one(*args, **kwargs):
+            self.task._dodge_heard_at = time.time() + 1
+            self.task._dodge_success_heard.set()
+            return None
+
+        self.task.find_one = Mock(side_effect=find_one)
+
+        self.task._hold_until_gold()
+
+        self.assertTrue(self.task._last_dodge_was_perfect)
+
+    def test_dodge_retry_waits_for_first_gold_after_normal_dodge(self):
+        self.task.COMBO_DODGE_RETRY_MAX = 2
+        self.task._hold_until_gold = Mock(
+            side_effect=[(HoldResult.DODGE, False), (HoldResult.GOLD, False)]
+        )
+        self.task._recover_from_dodge = Mock(return_value=False)
+        self.task._last_dodge_was_perfect = False
+
+        result = self.task._zankou_hold_with_recovery()
+
+        self.assertIs(result, HoldResult.GOLD)
+        calls = self.task._hold_until_gold.call_args_list
+        self.assertFalse(calls[0].kwargs["require_second_gold"])
+        self.assertFalse(calls[1].kwargs["require_second_gold"])
+
+    def test_dodge_retry_waits_for_second_gold_after_perfect_dodge(self):
+        self.task.COMBO_DODGE_RETRY_MAX = 2
+        self.task._hold_until_gold = Mock(
+            side_effect=[(HoldResult.DODGE, False), (HoldResult.GOLD, False)]
+        )
+        self.task._recover_from_dodge = Mock(return_value=False)
+        self.task._last_dodge_was_perfect = True
+
+        self.task._zankou_hold_with_recovery()
+
+        calls = self.task._hold_until_gold.call_args_list
+        self.assertFalse(calls[0].kwargs["require_second_gold"])
+        self.assertTrue(calls[1].kwargs["require_second_gold"])
 
     def test_hold_returns_dodge_when_dodge_heard_during_hold(self):
         def find_one(*args, **kwargs):

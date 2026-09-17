@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 import threading
 import time
@@ -35,6 +35,14 @@ class HoldResult(Enum):
     NO_GOLD = "no_gold"  # 到上限都没出金 E
     DODGE = "dodge"  # 长按期间闪避触发了(攻击被打断), 不是异常: 点左键 -> 等反击动画 -> 重打长按
     HANDLED = "handled"  # 成功闪避的反击路径已经自己打完二连, 上层不要再补
+
+
+class DodgeRetry(Enum):
+    """`_dodge_until_triggered` 的结局."""
+
+    TRIGGERED = "triggered"  # 普通闪避真的出来了(动作音), 上层重打长按
+    SUCCESS_REACTION = "success_reaction"  # 触发的是完美闪避, 现成的成功反击路径已接管
+    NOT_TRIGGERED = "not_triggered"  # 限时内没听到任何闪避音(可能正被连击), 上层再试几次
 
 _COMBO_LOG_KEYWORDS = (
     "FourCharComboTask",
@@ -141,7 +149,6 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     CYCLE_STAY_RATIO = 0.9
     COMBAT_STATE_LOG_INTERVAL = 2.0
     OPENER_COMBAT_LOST_GRACE = 1.5
-    SOUND_IMMEDIATE_SPAM_TIME = 1.2
     SOUND_SUCCESS_CLICK_DOWN = 0.08
     # 闪避反击动画时长: 点完左键要等它放完, 期间长按普攻不生效(会不出金 E 而被误判异常)。
     # 实测(2026-09-16, 7 次)反击左键 -> 开始长按 = 0.12~0.25s, 取 0.2s。
@@ -163,19 +170,18 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._entry_skill_until = 0.0
         self._opener_gold_e_done = False
         self._precombat_daffodill_q_done = False
-        self._sound_counter_pending = False
-        self._in_sound_reaction = False
         # 声音路径(闪避成功反击)最近一次打完残虹二连的时刻: 主循环知道"刚打过, 跳过",
         # 否则主循环会紧接着再打一套, 二次长按只能看到上一套残留的金 E -> NO_GOLD ->
         # 走掉血/闪避重试 -> 角色正被连击闪不出来 -> 抛异常停任务(2026-09-16 21:14)。
         self._last_zankou_combo_at = 0.0
-        self._pad_target = None
         self._alert_interrupt = threading.Event()
         self._dodge_motion_heard = threading.Event()
         self._dodge_success_heard = threading.Event()
         # 最近一次听到闪避(动作音/成功音)的时刻, 声音线程写, 主线程读:
         # 长按期间它变大 = 这次长按被闪避打断了, 不能按"没掉血"抛异常。
         self._dodge_heard_at = 0.0
+        # 打断长按的那次闪避是不是完美闪避(听到成功音) -> 决定之后等第一次还是第二次金 E
+        self._last_dodge_was_perfect = False
         self._holding = False
         self._combat_state_logged_at = 0.0
         self._q_wait_attack_at = 0.0
@@ -255,7 +261,6 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     def _reset_precombat(self):
         self._opener_gold_e_done = False
         self._precombat_daffodill_q_done = False
-        self._sound_counter_pending = False
         self._action_phase = ""
         self._suppress_combat_check = False
         self._alert_interrupt.clear()
@@ -532,7 +537,6 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._set_action_phase("loop")
         with self._suspend_combat_check():
             self._maybe_log_combat_state("loop")
-            self._maybe_handle_sound_counter()
 
             iroi = self.iroi
             self._switch_to(iroi)
@@ -588,7 +592,6 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         if daffodill.skill_available():
             self._skill_until_registered(daffodill, self.DAFFODILL_SKILL_REGISTER_TIMEOUT)
         while self.in_combat():
-            self._maybe_handle_sound_counter()
             if daffodill.ultimate_available():
                 self._cast_q(daffodill)
                 return
@@ -644,30 +647,22 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     # ------------------------------------------------------------ pad loops
 
     def _pad_until_q(self, target):
-        """在 target 身上打 PAD_FIELD_TIME 秒 -> 切残虹二连 -> 切回, 直到 target Q 可放.
-
-        期间记录 `_pad_target`, 供声音反击把切人目标对准当前垫刀对象。
-        """
+        """在 target 身上打 PAD_FIELD_TIME 秒 -> 切残虹二连 -> 切回, 直到 target Q 可放."""
         self._set_action_phase("pad_until_q")
-        self._pad_target = target
-        try:
-            while self.in_combat() and not target.ultimate_available():
-                start = time.time()
-                while (
-                    self.in_combat()
-                    and not target.ultimate_available()
-                    and time.time() - start < self.PAD_FIELD_TIME
-                ):
-                    self._maybe_handle_sound_counter()
-                    self.click()
-                    self.sleep(0.1)
-                if not self.in_combat() or target.ultimate_available():
-                    break
-                if self._zankou_combo_switch(target) is not target:
-                    return False
-            return self.in_combat() and target.ultimate_available()
-        finally:
-            self._pad_target = None
+        while self.in_combat() and not target.ultimate_available():
+            start = time.time()
+            while (
+                self.in_combat()
+                and not target.ultimate_available()
+                and time.time() - start < self.PAD_FIELD_TIME
+            ):
+                self.click()
+                self.sleep(0.1)
+            if not self.in_combat() or target.ultimate_available():
+                break
+            if self._zankou_combo_switch(target) is not target:
+                return False
+        return self.in_combat() and target.ultimate_available()
 
     # ------------------------------------------------------------- zankou
 
@@ -744,8 +739,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 if self._recover_from_dodge():
                     return HoldResult.HANDLED
                 damaged = False
-                # 闪避反击之后要等的是第二次金 E
-                second_gold = True
+                # "第二次金 E"是完美闪避(闪避攻击 -> 蓄力)特有的; 普通闪避之后
+                # 等的是第一次金 E, 否则会白等一个蓄力周期再撞 1.9s 兜底。
+                second_gold = self._last_dodge_was_perfect
                 continue
             if result is not HoldResult.NO_GOLD:
                 return result
@@ -768,11 +764,17 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 f"zankou gold E missing but damaged, dodge then retry "
                 f"({dodges}/{self.COMBO_DODGE_RETRY_MAX})"
             )
-            if not self._dodge_until_triggered():
+            retry = self._dodge_until_triggered()
+            if retry is DodgeRetry.SUCCESS_REACTION:
                 return HoldResult.HANDLED
+            if retry is DodgeRetry.NOT_TRIGGERED:
+                logger.warning(
+                    f"zankou dodge not confirmed, try again "
+                    f"({dodges}/{self.COMBO_DODGE_RETRY_MAX})"
+                )
             damaged = False
         self._raise_combo_anomaly(
-            f"zankou gold E still missing after {self.COMBO_DODGE_RETRY_MAX} dodges"
+            f"zankou gold E still missing after {self.COMBO_DODGE_RETRY_MAX} dodge attempts"
         )
 
     def _recover_from_dodge(self):
@@ -791,18 +793,22 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         return False
 
     def _dodge_until_triggered(self):
-        """连按闪避(shift)直到听到"闪避动作音", 确认闪避真的触发了.
+        """连按闪避(shift)直到听到闪避音, 确认闪避真的触发了.
 
         角色处于不可控状态时按 shift 不会产生闪避动作音, 所以这个音效就是
-        "闪避是否生效"的判据。返回 True = 普通闪避触发, 上层重打长按;
-        返回 False = 触发的是"成功闪避", 现成的成功闪避反击路径已经打完二连。
+        "闪避是否生效"的判据。
+        普通闪避 -> `TRIGGERED`(上层重打长按); 完美闪避 -> `SUCCESS_REACTION`
+        (现成的成功反击路径已经接管); 限时内什么都没听到 -> `NOT_TRIGGERED`,
+        **不抛异常**: 角色正被连击时闪不出来是正常情况, 交给上层再试几次。
         """
         self._set_action_phase("dodge_retry")
         self._dodge_motion_heard.clear()
         self._dodge_success_heard.clear()
         deadline = time.time() + self.DODGE_RETRY_TIMEOUT
         with self.skip_sleep_checks() as skip:
-            skip.all = True
+            # 只跳战斗检测: 警报音排的闪避(带方向的 d+lshift)要能照常执行,
+            # 它比这里裸按 shift 更容易出完美闪避; 而且它一响这里立刻就知道结果。
+            skip.check_combat = True
             while time.time() < deadline:
                 self._press_dodge()
                 if self._dodge_success_heard.is_set():
@@ -811,14 +817,15 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                     )
                     SoundCombatContext().discard_pending_action()
                     self._sound_dodge_success_action()
-                    return False
+                    return DodgeRetry.SUCCESS_REACTION
                 if self._dodge_motion_heard.is_set():
                     logger.info("dodge retry: dodge motion heard, dodge triggered")
-                    return True
+                    return DodgeRetry.TRIGGERED
                 self.sleep(self.DODGE_RETRY_INTERVAL)
-        self._raise_combo_anomaly(
-            f"dodge never triggered within {self.DODGE_RETRY_TIMEOUT}s while pressing shift"
+        logger.warning(
+            f"dodge not confirmed within {self.DODGE_RETRY_TIMEOUT}s while pressing shift"
         )
+        return DodgeRetry.NOT_TRIGGERED
 
     def _press_dodge(self):
         """按一次闪避(shift)."""
@@ -869,7 +876,6 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         """留在残虹身上连点左键, 直到环合满或脱战."""
         self._set_action_phase("zankou_cycle_full")
         while self.in_combat() and not self.is_cycle_full():
-            self._maybe_handle_sound_counter()
             self.next_frame()
             self.click()
             self.sleep(0.1)
@@ -918,6 +924,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                     # 长按期间闪避触发(动作音/成功音) -> 普攻被打断, 不是异常
                     if self._dodge_heard_at > hold_start:
                         dodged = True
+                        # 成功音 = 完美闪避(有闪避攻击/蓄力, 要等第二次金 E);
+                        # 只有动作音 = 普通闪避(等第一次金 E 就行)。
+                        self._last_dodge_was_perfect = self._dodge_success_heard.is_set()
                         break
                     box = self.find_one(Labels.zankou_skill_gold, threshold=0.0)
                     conf = box.confidence if box else 0.0
@@ -1063,7 +1072,6 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
 
     def _stay_until_q_ready(self, zankou):
         while self.in_combat() and not zankou.ultimate_available():
-            self._maybe_handle_sound_counter()
             self.click()
             self.sleep(0.1)
 
@@ -1352,7 +1360,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
 
         残虹: 点按左键 -> 等 DODGE_COUNTER_WAIT(闪避反击动画) -> 残虹二连.
               二连长按期间若又听到攻击警报, 立即打断: 闪避 -> 点按左键 -> 再等 -> 再打二连。
-        其他角色: 保持原逻辑(连点左键+连点切人键), 随后主循环切残虹打二连。
+        其他角色: 只点按左键触发闪避反击, 然后直接返回 —— 声音动作是在主线程的
+              sleep 里跑的, 返回后被打断的代码(放 E / 放 Q / 切人)会自然接着执行,
+              不强行切人, 也不接管主循环的二连。
         """
         self._dodge_success_heard.set()
         self._dodge_heard_at = time.time()
@@ -1365,7 +1375,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         with self.skip_sleep_checks() as skip:
             skip.all = True
             if current is not self.zankou:
-                self._sound_immediate_reaction()
+                self._set_action_phase("sound_success_other")
+                self.click(down_time=self.SOUND_SUCCESS_CLICK_DOWN)
+                self.sleep(self.DODGE_COUNTER_WAIT)
                 return
             self._set_action_phase("sound_success")
             while True:
@@ -1388,38 +1400,6 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         """闪避动作音回调(在声音监听线程上): 说明闪避真的触发了."""
         self._dodge_heard_at = time.time()
         self._dodge_motion_heard.set()
-
-    def _sound_immediate_reaction(self):
-        """触发闪避反击后第一时间连点左键并连点切人键."""
-        current = self.get_current_char(raise_exception=False)
-        by_zankou = current is self.zankou
-        if by_zankou and self._pad_target is not None:
-            target = self._pad_target
-        else:
-            target = self.daffodill if by_zankou else self.zankou
-        deadline = time.time() + self.SOUND_IMMEDIATE_SPAM_TIME
-        while time.time() < deadline:
-            self.send_key(
-                target.index + 1, action_name="sound_switch", interval=0.1, down_time=0.05
-            )
-            self.click()
-            time.sleep(0.06)
-        self._sound_counter_pending = True
-
-    def _maybe_handle_sound_counter(self):
-        if not self._sound_counter_pending or self._in_sound_reaction:
-            return
-        self._sound_counter_pending = False
-        self._in_sound_reaction = True
-        try:
-            self._switch_to(self.zankou)
-            self._zankou_combo()
-        except (NotInCombatException, ZankouComboAnomaly):
-            raise
-        except Exception as e:
-            logger.error("sound counter reaction error", e)
-        finally:
-            self._in_sound_reaction = False
 
     # ---------------------------------------------------------------- switch
 
