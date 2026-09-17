@@ -78,10 +78,12 @@ def best_center(white, cx, cy, r_max, r_min):
         (12.0, 180, 2.0, 1.0),
         (2.0, ANGLES, 0.5, R_STEP),
     ):
+        # 锚定本轮起点: 偏移量相对本轮开始时的圆心算, 否则会在循环里一路走偏
+        base_x, base_y = best[1], best[2]
         offsets = np.arange(-radius, radius + 1e-9, step)
         for dy in offsets:
             for dx in offsets:
-                px, py = best[1] + dx, best[2] + dy
+                px, py = base_x + dx, base_y + dy
                 prof_radii, samples = radial_profile(white, px, py, r_max, angles, r_step)
                 score = ring_score(prof_radii, samples, r_min)[0]
                 if score > best[0]:
@@ -167,10 +169,14 @@ def detect(white, cx, cy, r_max, r_min=MIN_RADIUS):
         mid = 0.5 * (r_in + r_out)
         if abs(fit_r - mid) > mid * 0.5:
             break
-        # 拟合只在附近微调圆心, 避免被别的白色物体拉跑
+        # 拟合只在附近微调, 而且必须让环得分变好才接受(否则会被别的白色物体拉跑)
         if np.hypot(fit_cx - cx, fit_cy - cy) > max(3.0, mid * 0.25):
             break
-        cx, cy = fit_cx, fit_cy
+        radii2, samples2 = radial_profile(white, fit_cx, fit_cy, r_max)
+        new_score = ring_score(radii2, samples2, r_min)[0]
+        if new_score <= score + 1e-3:
+            break
+        score, cx, cy = new_score, fit_cx, fit_cy
     radii, samples = radial_profile(white, cx, cy, r_max)
     band = find_band(radii, samples, r_min)
     if band is None:
@@ -210,11 +216,44 @@ def _white_runs(angles_deg):
     return runs
 
 
-def report(result, image_shape, label=""):
+def cycle_full_ratio(img, top_span=12.0, inner=0.84, outer=0.99, white=200, step=0.25):
+    """镜像 app 的 `cycle_ratio()`: 顶部(12点±top_span度)白环厚度 / 整圈中位厚度.
+
+    未满时缺口在 12 点方向; "差一点点(98%)"时顶部虽然碰到白色, 但只有一条很薄的白边,
+    所以比的是**厚度**而不是"有没有白像素"。整圈基本没白(空环)返回 0.0。
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    height, width = gray.shape
+    outer_r = min(width, height) / 2.0
+    radii = np.arange(outer_r * inner, outer_r * outer, step)
+    if radii.size < 2:
+        return 0.0
+    angles = np.arange(0.0, 360.0, 1.0)
+    theta = np.radians(angles)
+    xs = (width / 2.0 + np.outer(np.cos(theta), radii)).astype(np.float32)
+    ys = (height / 2.0 + np.outer(np.sin(theta), radii)).astype(np.float32)
+    samples = cv2.remap(gray, xs, ys, cv2.INTER_LINEAR)
+    thickness = (samples >= white).sum(axis=1).astype(np.float64)
+    median = float(np.median(thickness))
+    if median < 1.0:
+        return 0.0
+    top = thickness[np.abs(angles - 270.0) <= top_span]
+    return float(min(1.0, top.mean() / median))
+
+
+def app_cycle_crop(image):
+    """app 的 box_of_screen_scaled(2560,1440,944,1316,66,66) 等价裁剪."""
+    height, width = image.shape[:2]
+    x, y = int(944 / 2560 * width), int(1316 / 1440 * height)
+    w, h = int(66 / 2560 * width), int(66 / 1440 * height)
+    return image[y : y + h, x : x + w]
+
+
+def report(result, image, label=""):
     if result is None:
         print(f"[ring] {label} no white ring found near that point")
         return 1
-    height, width = image_shape[:2]
+    height, width = image.shape[:2]
     cx, cy = result["center"]
     scale = 2560.0 / width
     print(f"[ring] {label}")
@@ -229,6 +268,11 @@ def report(result, image_shape, label=""):
     print(f"  white angle coverage {result['fill'] * 100:.1f}%")
     runs = ", ".join(f"{a:.0f}~{b:.0f}deg" for a, b in result["runs"][:8])
     print(f"  white runs: {runs}")
+    ratio = cycle_full_ratio(app_cycle_crop(image))
+    print(
+        f"  cycle_ratio (app 同款裁剪) {ratio:.2f} -> "
+        f"{'FULL' if ratio >= 0.5 else 'not full'}"
+    )
     return 0
 
 
@@ -355,7 +399,7 @@ def main():
 
     cx, cy = (float(value) for value in args.center.split(","))
     result = detect(whiteness(image), cx, cy, r_max, r_min=args.r_min)
-    code = report(result, image.shape, label=os.path.basename(args.image))
+    code = report(result, image, label=os.path.basename(args.image))
     if result is not None and args.save:
         out, crop = annotate(image, result)
         cv2.imwrite(args.save, out)

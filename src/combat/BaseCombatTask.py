@@ -1052,51 +1052,59 @@ class BaseCombatTask(CharElementUIMixin, CombatCheck):
         return ret
 
     def cycle_ratio(self) -> float:
-        """环合条顶部是否已经填满 (0.0 ~ 1.0).
+        """环合条顶部白环厚度 / 整圈白环厚度的中位数 (0.0 ~ 1.0).
 
-        环合是**像倒水一样从下往上**涨的, 未满时缺口一定在 12 点方向, 所以只需要看
-        环带最上面一小段(12 点 +-12 度)是不是白的。
+        环合是**像倒水一样从下往上**涨的, 未满时缺口一定在 12 点方向。实测(2026-09-17):
+        - 目测 40% / 75%: 顶部 12 点方向整段是暗的;
+        - 目测 98%("几乎满"): 顶部只剩一条 1~2 个采样点(~0.3px)的白边 —— 仍然"有白像素",
+          所以"顶部有没有白"不够, 必须比**厚度**;
+        - 满环: 顶部厚度和整圈一致(~2.5px)。
 
-        旧实现取"12 点 / 6 点白像素密度比", 有两个问题: 环合过半后上下两点都白,
-        比值饱和在 ~1.0 分不出 50% 和 100%; 而 `>0.9` 才算满又要求两点密度几乎相等,
-        线宽/抗锯齿略有差异就误判成未满(实测 2026-09-17 因此漏掉一次入场技预测)。
-        几何实测(2560x1440, `tools\\ring_detect.cmd`): 环在半径 28.7~31.3px, 环厚 ~2.6px。
+        所以判据取"顶部厚度 / 整圈中位厚度", 自校准, 不依赖分辨率/阈值。几何实测
+        (2560x1440, `tools\\ring_detect.cmd`): 环在半径 28.7~31.3px, 环厚 ~2.6px。
         """
         img = self.box_of_screen_scaled(
             2560, 1440, 944, 1316, width_original=66, height_original=66
         ).crop_frame(self.frame)
-        return self._cycle_top_white_fraction(img)
+        return self._cycle_top_thickness_ratio(img)
 
     CYCLE_TOP_ANGLE_SPAN = 12.0  # 只看 12 点方向 +-12 度
     CYCLE_RING_INNER = 0.84  # 环带半径范围 / 外半径(实测 28.7~31.3 对 外半径 ~31.3)
     CYCLE_RING_OUTER = 0.99
     CYCLE_WHITE_LEVEL = 200
+    CYCLE_SAMPLE_STEP = 0.25  # 径向采样步长(px), 要能分辨 98% 时那条 ~0.3px 白边
+    CYCLE_FULL_RATIO = 0.5
 
     @classmethod
-    def _cycle_top_white_fraction(cls, img) -> float:
-        """环带最上面一段里, 有多少个角度的环带是白的 (0.0 ~ 1.0).
-
-        每个角度在环带半径范围内取最大值, 所以对半径估计的误差不敏感;
-        暗环白度约 40, 白环约 238, 阈值 200 分得很干净。
-        """
+    def _cycle_top_thickness_ratio(cls, img) -> float:
+        """顶部白环厚度 / 整圈中位厚度; 整圈基本没白(空环)时返回 0.0."""
         h, w = img.shape[:2]
         if h < 8 or w < 8:
             return 0.0
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         center_x, center_y = w / 2.0, h / 2.0
         outer_r = min(w, h) / 2.0
-        radii = np.arange(outer_r * cls.CYCLE_RING_INNER, outer_r * cls.CYCLE_RING_OUTER, 0.5)
-        if radii.size == 0:
+        radii = np.arange(
+            outer_r * cls.CYCLE_RING_INNER,
+            outer_r * cls.CYCLE_RING_OUTER,
+            cls.CYCLE_SAMPLE_STEP,
+        )
+        if radii.size < 2:
             return 0.0
-        span = cls.CYCLE_TOP_ANGLE_SPAN
-        angles = np.radians(np.arange(270.0 - span, 270.0 + span + 1e-9, 1.5))
-        xs = (center_x + np.outer(np.cos(angles), radii)).astype(np.float32)
-        ys = (center_y + np.outer(np.sin(angles), radii)).astype(np.float32)
+        angles = np.arange(0.0, 360.0, 1.0)
+        theta = np.radians(angles)
+        xs = (center_x + np.outer(np.cos(theta), radii)).astype(np.float32)
+        ys = (center_y + np.outer(np.sin(theta), radii)).astype(np.float32)
         samples = cv2.remap(gray, xs, ys, cv2.INTER_LINEAR)
-        return float((samples >= cls.CYCLE_WHITE_LEVEL).any(axis=1).mean())
+        thickness = (samples >= cls.CYCLE_WHITE_LEVEL).sum(axis=1).astype(np.float64)
+        median = float(np.median(thickness))
+        if median < 1.0:
+            return 0.0
+        top = thickness[np.abs(angles - 270.0) <= cls.CYCLE_TOP_ANGLE_SPAN]
+        return float(min(1.0, top.mean() / median))
 
     def is_cycle_full(self) -> bool:
-        return self.cycle_ratio() > 0.5
+        return self.cycle_ratio() >= self.CYCLE_FULL_RATIO
 
 
     def walk_until_combat(
