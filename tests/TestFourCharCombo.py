@@ -308,6 +308,27 @@ class TestFourCharCombo(unittest.TestCase):
         task._cast_q.assert_any_call(task.sakiri)
         task._zankou_double_q.assert_called_once()
 
+    def test_opener_gold_e_accepts_immediate_gold(self):
+        # 开场金E由玩家手动蓄力, 脚本开始长按时金E可能已亮: 不能套用 COMBO_HOLD_MIN 忽略它
+        self.task._zankou_hold_with_recovery = Mock(return_value=HoldResult.GOLD)
+
+        self.task._zankou_gold_e()
+
+        self.assertEqual(
+            self.task._zankou_hold_with_recovery.call_args.kwargs.get("min_hold"), 0.0
+        )
+
+    def test_hold_with_min_hold_zero_accepts_existing_gold_immediately(self):
+        # 金E在长按开始时就已亮(min_hold=0): 第一次轮询就接受, 不白等 COMBO_HOLD_MIN
+        self.task.COMBO_HOLD_MIN = 5.0
+        self.task.find_one = Mock(return_value=Mock(confidence=0.9))
+        start = time.time()
+
+        result, _damaged = self.task._hold_until_gold(min_hold=0.0)
+
+        self.assertIs(result, HoldResult.GOLD)
+        self.assertLess(time.time() - start, 0.5)
+
     def test_wait_controllable_needs_raw_cd_to_tick(self):
         # 实测 bug: 大招一按下去 Q 图标就变灭, 但此时还在特写里(in_team=False),
         # 早雾的 E 连按 2s 全废。有冷却数字时必须等原始数字真的变小。

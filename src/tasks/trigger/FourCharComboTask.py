@@ -689,9 +689,16 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     # ------------------------------------------------------------- zankou
 
     def _zankou_gold_e(self):
-        """开局金 E: 长按轮询金E -> 点 E."""
+        """开局金 E: 长按轮询金E -> 点 E.
+
+        min_hold=0: 开场金 E 由玩家手动长按蓄力, 脚本开始长按时金 E 可能早已亮起 ——
+        不能套用 COMBO_HOLD_MIN(它忽略"长按开始时就已存在的金 E", 防的是上一套
+        二连的残留金 E, 21:14 撞车), 否则玩家看到金 E 后还要白等 0.67s+ 才释放
+        (2026-09-17 18:29 实机: 金 E 38.4s 已亮, 39.287 才接受)。开场时本场还没有
+        打过任何二连, 不存在残留金 E, 立即接受是安全的。
+        """
         self._set_action_phase("zankou_gold_e")
-        if self._zankou_hold_with_recovery() is HoldResult.HANDLED:
+        if self._zankou_hold_with_recovery(min_hold=0.0) is HoldResult.HANDLED:
             return
         self._skill_until_registered(self.zankou)
 
@@ -741,7 +748,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._last_combo_finished_at = time.time()
         return False
 
-    def _zankou_hold_with_recovery(self, interrupt_event=None, require_second_gold=False):
+    def _zankou_hold_with_recovery(
+        self, interrupt_event=None, require_second_gold=False, min_hold=None
+    ):
         """长按轮询金 E; 一次超时就切达芙蒂尔上场打一轮, 再切回来重打.
 
         **不重按**(长按起点由 `_switch_to` 的入场技预测保证), 也**不再用"普通闪避重试"**
@@ -761,7 +770,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         timeouts = 0
         while True:
             result, _damaged = self._hold_until_gold(
-                interrupt_event=interrupt_event, require_second_gold=second_gold
+                interrupt_event=interrupt_event,
+                require_second_gold=second_gold,
+                min_hold=min_hold,
             )
             if result is HoldResult.DODGE:
                 if self._recover_from_dodge():
@@ -904,7 +915,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             self.sleep(0.1)
         logger.info(f"four char combo cycle full ratio={self.cycle_ratio():.2f}")
 
-    def _hold_until_gold(self, interrupt_event=None, require_second_gold=False):
+    def _hold_until_gold(
+        self, interrupt_event=None, require_second_gold=False, min_hold=None
+    ):
         """长按轮询金 E; 返回 (HoldResult, damaged).
 
         damaged 由长按期间的**多次**血条采样得出 (伊洛伊大招会在后台回血,
@@ -940,7 +953,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             with self.skip_sleep_checks() as skip:
                 skip.check_combat = True
                 start = time.time()
-                min_until = start + (0.0 if require_second_gold else self.COMBO_HOLD_MIN)
+                min_until = start + (
+                    0.0
+                    if require_second_gold
+                    else (self.COMBO_HOLD_MIN if min_hold is None else min_hold)
+                )
                 max_until = start + (
                     self.DODGE_COMBO_HOLD if require_second_gold else self.COMBO_HOLD_MAX
                 )
