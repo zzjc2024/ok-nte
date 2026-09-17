@@ -208,15 +208,21 @@ class TestFourCharCombo(unittest.TestCase):
 
     def test_hold_waits_out_zankou_combo_linger(self):
         # 残虹二连(松开+单击)后攻击动作残留 1.5s: 期间开始新长按必被动画吃掉, 先补足等待
-        self.task._last_combo_finished_at = time.time() - 0.5
-        self.task.find_one = Mock(return_value=Mock(confidence=0.9))
+        task = self.task
+        task._last_combo_finished_at = time.time() - 0.5
+        task.find_one = Mock(return_value=Mock(confidence=0.9))
 
-        result, _damaged = self.task._hold_until_gold()
+        def sleep_passes_time(seconds):
+            task._last_combo_finished_at -= seconds  # mock sleep 不走真实时间, 手动推进
+
+        task.sleep = Mock(side_effect=sleep_passes_time)
+
+        result, _damaged = task._hold_until_gold()
 
         self.assertIs(result, HoldResult.GOLD)
         linger_calls = [
             call
-            for call in self.task.sleep.call_args_list
+            for call in task.sleep.call_args_list
             if call.args and isinstance(call.args[0], float) and 0.9 <= call.args[0] <= 1.1
         ]
         self.assertEqual(len(linger_calls), 1)
@@ -423,6 +429,60 @@ class TestFourCharCombo(unittest.TestCase):
 
         self.assertIs(result, HoldResult.GOLD)
         self.assertLess(time.time() - start, 0.5)
+
+    def test_hold_rejects_leftover_gold_and_rechecks_linger(self):
+        # 残金过滤: 二连完成 0.5s 后开始的长按必须先补足 1.5s 残留期;
+        # 补足期间时间戳被重入的反应刷新时, 要再补一轮(19:53 实机连打两套二连的根因)
+        task = self.task
+        task._last_combo_finished_at = time.time() - 0.5
+        task.find_one = Mock(return_value=Mock(confidence=0.9))
+        stamped = [False]
+
+        def sleep_and_restamp(seconds):
+            task._last_combo_finished_at -= seconds  # mock sleep 不走真实时间, 手动推进
+            if not stamped[0] and seconds > 0.9:
+                stamped[0] = True  # 只重入一次, 否则测试自身死循环
+                task._last_combo_finished_at = time.time()
+
+        task.sleep = Mock(side_effect=sleep_and_restamp)
+
+        task._hold_until_gold()
+
+        linger_sleeps = [
+            call
+            for call in task.sleep.call_args_list
+            if call.args and isinstance(call.args[0], float) and call.args[0] > 0.3
+        ]
+        self.assertGreaterEqual(len(linger_sleeps), 2)  # 刷新后重新补足
+
+    def test_zankou_combo_switch_confirms_switch_and_raises_on_failure(self):
+        # 二连后必须切走: 切人走确认重试, 仍失败就抛异常而不是留在场上连打
+        task = self.task
+        task._switch_confirmed = Mock(side_effect=[True, False])  # 切残虹成功, 切达芙失败
+        task._zankou_combo = Mock()
+        task.cycle_ratio = Mock(return_value=0.2)
+
+        with self.assertRaises(ZankouComboAnomaly):
+            task._zankou_combo_switch(task.daffodill)
+
+        task._switch_confirmed.assert_any_call(task.zankou)
+        task._switch_confirmed.assert_any_call(task.daffodill)
+
+    def test_double_q_waits_q_without_normal_attacks(self):
+        # 切到残虹后第一时间放 Q: 等待期间不插普攻
+        task = self.task
+        task._q_button_lit = Mock(return_value=True)
+        task.get_cd = Mock(return_value=0.0)
+        task.get_current_char = Mock(return_value=task.zankou)
+        task._enemy_present = Mock(return_value=True)
+        task._press_q_ready = Mock(return_value=True)
+        task._wait_in_team = Mock()
+        task._press_q_through_animations = Mock(return_value=4)
+        task._wait_double_q_recovery = Mock()
+
+        task._zankou_double_q()
+
+        task._press_q_ready.assert_called_once_with(task.zankou, attack_while_waiting=False)
 
     def test_wait_controllable_needs_raw_cd_to_tick(self):
         # 实测 bug: 大招一按下去 Q 图标就变灭, 但此时还在特写里(in_team=False),

@@ -912,10 +912,12 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
 
         环合 >= CYCLE_STAY_RATIO 时不再和达芙蒂尔互切: 留在残虹身上连点左键直到环合满,
         然后切伊洛伊; 否则切 default_target。`max_hold_extra` 透传给二连长按
-        (双 Q 后的提前长按延长上限用)。
+        (双 Q 后的提前长按延长上限用)。切人一律 `_switch_confirmed`(重试+复查):
+        检测失明时裸切会把后续整段流程跑在错的角色上。
         """
         self._set_action_phase("zankou_enter")
-        self._switch_to(self.zankou)
+        if not self._switch_confirmed(self.zankou):
+            self._raise_combo_anomaly("switch to zankou failed after retries (pre combo)")
         # 切人刚确认时角色还在切人动画里, 立刻长按普攻不生效 (实测确认后 0.001s 就长按, 金 E 全空)
         self.sleep(self.SWITCH_SETTLE_TIME)
         self._zankou_combo(max_hold_extra=max_hold_extra)
@@ -926,9 +928,15 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 f"stay on zankou until full"
             )
             self._stay_until_cycle_full()
-            self._switch_to(self.iroi)
+            if not self._switch_confirmed(self.iroi):
+                self._raise_combo_anomaly("switch to iroi failed after retries (cycle full)")
             return self.iroi
-        self._switch_to(default_target)
+        # 二连打完必须切走(残留 1.5s 输出让给队友, 也是主循环的节奏); 裸 `_switch_to`
+        # 失败会没人管, 残虹站在场上被后续流程当成现成目标反复二连(19:53 实机)。
+        if not self._switch_confirmed(default_target):
+            self._raise_combo_anomaly(
+                f"switch to {default_target} failed after retries (post combo)"
+            )
         return default_target
 
     def _stay_until_cycle_full(self):
@@ -959,12 +967,16 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         damaged = False
         health_peak = None
         health_samples = 0
-        # 残虹二连残留期(ZANKOU_COMBO_LINGER_TIME)内不允许开始新长按, 先显式补足,
-        # 不依赖各路径(切人/达芙 Q 施放等)刚好消耗掉这 1.5s。
-        linger_wait = self.ZANKOU_COMBO_LINGER_TIME - (
-            time.time() - self._last_combo_finished_at
-        )
-        if linger_wait > 0:
+        # 残虹二连残留期: 一套二连完成后 1.5s 内出现的金 E 是残留, 接了就会把同一套
+        # 再打一遍(2026-09-17 19:53 实机: 声音反应的二连完成后 0.79s, 主循环把残金
+        # conf=0.880 当真金又打了一套)。声音反应可能在我方 sleep 里重入执行并刷新
+        # 时间戳, 所以循环补足直到时间戳干净, 不能只算一次。
+        while True:
+            linger_wait = self.ZANKOU_COMBO_LINGER_TIME - (
+                time.time() - self._last_combo_finished_at
+            )
+            if linger_wait <= 0:
+                break
             logger.info(f"zankou wait combo linger {linger_wait:.2f}s before hold")
             self.sleep(linger_wait)
         # 入场技不再前置等待: 直接按住左键穿过入场技(期间按键不生效但按住状态保留),
@@ -1008,8 +1020,15 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                     conf = box.confidence if box else 0.0
                     if conf > best_conf:
                         best_conf = conf
+                    # 残留金 E 过滤: 距上次二连完成不足 1.5s 的金 E 一律不接。
+                    # (长按期间 _holding=True, 声音反应会让位, 时间戳不会中途刷新;
+                    #  但按住前的等待里可能被重入刷新, 所以每次轮询都重查。)
+                    linger_ok = (
+                        time.time() - self._last_combo_finished_at
+                        >= self.ZANKOU_COMBO_LINGER_TIME
+                    )
                     if require_second_gold:
-                        if phase == 0 and conf >= self.GOLD_THRESHOLD:
+                        if phase == 0 and linger_ok and conf >= self.GOLD_THRESHOLD:
                             phase = 1
                             logger.info(
                                 f"second gold: first gold E seen (dodge attack), conf={conf:.3f}"
@@ -1027,11 +1046,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                                     )
                             else:
                                 lost_since = 0.0
-                        elif phase == 2 and conf >= self.GOLD_THRESHOLD:
+                        elif phase == 2 and linger_ok and conf >= self.GOLD_THRESHOLD:
                             gold = True
                             logger.info(f"second gold: second gold E ready, conf={conf:.3f}")
                             break
-                    elif time.time() >= min_until and conf >= self.GOLD_THRESHOLD:
+                    elif linger_ok and time.time() >= min_until and conf >= self.GOLD_THRESHOLD:
                         gold = True
                         break
                     pixels = self._health_pixels()
@@ -1092,7 +1111,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         if not self._enemy_present():
             logger.warning("zankou double q skipped: no enemy signal, keep the ultimate")
             return
-        if not self._press_q_ready(zankou):
+        if not self._press_q_ready(zankou, attack_while_waiting=False):
             return
         self._wait_in_team(timeout=self.Q_CUTSCENE_START_WAIT)
         deadline = time.time() + self.Q_DOUBLE_TIMEOUT
@@ -1176,12 +1195,14 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._wait_controllable(char, was_lit)
         return True
 
-    def _press_q_ready(self, char):
+    def _press_q_ready(self, char, attack_while_waiting=True):
+        """等 Q 可用; `attack_while_waiting=False` 用于残虹双 Q——切过来第一时间放 Q,
+        等待期间不许插普攻(用户要求), 普攻动画会把 Q 顶掉。"""
         self._q_wait_attack_at = time.time()
         if self.wait_until(
             char.ultimate_available,
             time_out=self.Q_READY_TIMEOUT,
-            pre_action=self._q_wait_attack,
+            pre_action=self._q_wait_attack if attack_while_waiting else None,
             raise_if_not_found=False,
         ):
             return True
