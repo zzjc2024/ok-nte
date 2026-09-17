@@ -288,19 +288,26 @@ White → Green → Red → Purple → Blue → Yellow → White
 
 ## 9. 手动辅助任务：残虹二连(F12)
 
-用户决定暂缓整套自动四人连招，先要一个**手动游玩时按一下 F12 打一次残虹二连**的简单功能。
+用户决定暂缓整套自动四人连招，先要一个**手动游玩时按一下 F12 打一次残虹二连**的功能。
 
-- 实现：`src/tasks/trigger/ZankouComboHotkeyTask.py`（继承 `BaseCombatTask, TriggerTask`）；注册在 `src/config.py` 的 `trigger_tasks`；任务名 `残虹二连(F12)`；默认关；`trigger_interval=0.1`。
-- 序列（`_run_combo`，2026-09-17 晚按用户要求再简化）：
+- 实现：`src/tasks/trigger/ZankouComboHotkeyTask.py`，**继承 `FourCharComboTask`**（复用长按轮询金 E、伊洛伊 Q/浮游炮、声音接线等全部 helper），只覆写 `run()` 和 F12 的流程，**不跑 `_run_rotation`**；注册在 `src/config.py` 的 `trigger_tasks`；任务名 `残虹二连(F12)`；默认关；`trigger_interval=0.1`。
+- 主流程（`_run_combo`）：
   1. **直接按 1 切残虹**（不管当前是谁：在残虹身上按 1 也没有负面效果）→ 等 `SWITCH_SETTLE_TIME=0.05s` → **顺便复查**当前角色，发现不是残虹就**再按一次 1** 再等 0.05s（再不是只记日志，继续长按 —— 金 E 本身就是"残虹在场"的可靠信号）。不做切人确认、不等切人动画。
-  2. 长按左键轮询金 E（`_hold_until_gold`，下限 `COMBO_HOLD_MIN=0.67s` 忽略残留金 E，上限 `COMBO_HOLD_MAX=0.9s`）→ 松开 → 等 `COMBO_RELEASE_GAP=0.06s`。
-  3. **趁这个等待读环合值**：`>= CYCLE_SWITCH_RATIO=0.97` → 切 **3 号伊洛伊**（满环合切相邻属性触发连携登场技）；否则切 **2 号达芙蒂尔**。
-  4. 单击左键完成二连 → 切到目标号位；**切达芙蒂尔时在 `DAFFODILL_PAD_WINDOW=0.5s` 内补 `DAFFODILL_PAD_CLICKS=5` 次左键，伊洛伊不补**。
-- **失败只记日志直接结束**（没出金 E / 认不出角色）：不做恢复、不切达芙蒂尔救场、不抛异常停任务 —— 玩家再按一次即可（用户明确要求）。`run()` 里**没有队伍/战斗前置检查**，按了 F12 就执行（用户要求"啥也不管"）。
-- 热键：pynput 全局监听 F12（`on_release`，避免长按自动重复）。`enable()` 和 `run()` 都会幂等注册（加锁），`disable()` / `on_destroy()` 注销；app 全局 Start/Stop 热键若也是 F12 会 `log_warning` 提醒一次。
-- 复用四人连招任务的实测参数：`GOLD_THRESHOLD=0.65`、`COMBO_HOLD_MIN/MAX`、`cycle_ratio()`。
-- 与四人连招任务的差别（刻意简化）：不跑自动循环、不接声音、没有闪避/恢复状态机、切人不做确认、没有落盘日志（走 `logs/ok-script.log` 和 UI Log）。
-- 入场技：切到残虹时**按住左键穿过入场技**（按键不生效但按住状态保留），长按上限额外加 `ENTRY_SKILL_EXTRA=1.2s`。只延长上限，不影响"按完 1 号位 + 0.05s 就开始长按"。
-- 防双打：距上次二连（松开+单击）不足 `COMBO_MIN_INTERVAL=1.5s` 的 F12 直接忽略（二连后攻击动作残留约 1.5s，且残留金 E 会被误当新金 E）。
-- 单测：`tests/TestZankouComboHotkey.py`（先按 1、没切到就再按一次、环合高切 3 / 低切 2、只有达芙补 5 次、环合值在松开与单击之间读、间隔忽略、金 E 下限/超时、异常也松开鼠标）。
-- **未验证（真机没跑过）**：F12 响应延迟（executor 轮询 0.1s）、"按 1 + 0.05s 就长按"是否够快、穿入场技长按、2.1s 上限、达芙那 5 次普攻的节奏、0.97 这个环合阈值。
+  2. 长按左键轮询金 E（继承的 `_hold_until_gold`，下限 `COMBO_HOLD_MIN=0.67s` 忽略残留金 E，上限 `COMBO_HOLD_MAX=0.9s` + 入场技 `ZANKOU_ENTRY_SKILL_WAIT`）→ 松开 → 等 `COMBO_RELEASE_GAP=0.06s`。
+  3. **趁这个等待读环合值**：`>= CYCLE_SWITCH_RATIO=0.97` 走伊洛伊流程，否则切 2 号达芙蒂尔。
+  4. 单击左键完成二连；**切达芙蒂尔时在 `DAFFODILL_PAD_WINDOW=0.5s` 内补 `DAFFODILL_PAD_CLICKS=5` 次左键，伊洛伊不补**。
+- 伊洛伊流程（`_iroi_flow`，满环合；切过去几乎必然吃她的入场技）：
+  1. 按 3 切伊洛伊 → **从切过去就开始连按 E**（入场技期间按键不生效、图标模板也会失明，所以不预判可用性；连按到"看到图标亮过之后 CD 数字出现"算注册，`IROI_E_WAIT_TIMEOUT=3s`）。
+  2. E 注册后等它的**原始冷却数字**掉到 `E_CD_AFTER_CAST=11.6s`（E 满冷 12s，即放出去约 0.4s，这时接 Q 才不会被 E 前摇吃掉）→ 判 Q。
+  3. 分支：Q 可用 → `_iroi_q_funnel()`（Q + 浮游炮）；**E 注册了但 Q 不可用 → 本次 F12 停**（什么都不做）；**E 没注册且 Q 不可用 → 直接切达芙 + 5 次左键**；E 没注册但 Q 可用 → 直接 Q + 浮游炮。
+  4. Q + 浮游炮之后 → 切残虹打第二套二连（同样 `_switch_to_zankou` + 长按）→ 切达芙 + 5 次左键。第二套没出金 E 只记日志结束。
+- **E/Q 冷却必须自己按 OCR 位置读**（`_raw_skill_cd` / `_raw_ultimate_cd`，x < 0.89 = E、x > 0.925 = Q），**不能用 `refresh_cd()`/`get_cd()`**：它们把数字存在 `get_current_char().index` 下，而切人/入场技期间那个标记会失明（实测能持续 3s），会读到上一个人的冷却 → 分支走错。`Q 可用` = `_q_button_lit() and _raw_ultimate_cd() <= 0`。
+- 声音（继承四人连招任务的接线；动作跑在 `sleep_check` 里，**不会被上面的流程挡住**）：
+  - **非残虹**触发闪避成功音：照常点一下左键触发闪避反击，然后置 `_abort_f12` 停掉本次 F12 流程；
+  - **残虹**触发闪避成功音：点左键 → `_zankou_combo_interruptible(require_second_gold=True)`（等第二次金 E，期间可再被攻击警报打断并重打）→ 二连打完 → 按环合规则切人（>=0.97 伊洛伊，否则达芙 + 5 次左键）；
+  - 长按期间听到成功音时 `_holding` 为真，声音侧让位给长按（继承行为）；`_abort_f12` 在每轮 F12 开头清零，声音路径结束后置位防止主流程再打一套。
+- **失败只记日志直接结束**（没出金 E / 读不到队伍）：不做恢复、不切达芙蒂尔救场、不抛异常停任务 —— 玩家再按一次即可（用户明确要求）。`run()` 只保留"在队伍界面 + 队伍读到 4 人"两个前置（后面所有检测都依赖 HUD）。
+- 热键：pynput 全局监听 F12（`on_release`，避免长按自动重复）。`enable()` 和 `run()` 都会幂等注册（加锁），`disable()` / `on_destroy()` 注销并 `SoundCombatContext.clear_task_if(self)`；app 全局 Start/Stop 热键若也是 F12 会 `log_warning` 提醒一次。
+- 防双打：距上次二连（松开+单击）不足 `F12_MIN_INTERVAL=1.5s` 的 F12 直接忽略（二连后攻击动作残留约 1.5s，且残留金 E 会被误当新金 E）；长按被打断（警报/闪避）时最多重打 `HOLD_RETRIES=3` 次。
+- 单测：`tests/TestZankouComboHotkey.py`（33 个：先按 1 / 没切到再按一次、环合高走伊洛伊低切达芙、只有达芙补 5 次、环合值在松开与单击之间读、伊洛伊四条分支、E 注册判定、声音非残虹/残虹两条路、间隔忽略、run 前置）。
+- **未验证（真机没跑过）**：F12 响应延迟（executor 轮询 0.1s）、"按 1 + 0.05s 就长按"是否够快、穿入场技长按、E 连按到注册的 3s 窗口、`11.6s` 这个 E 冷却阈值、`0.97` 环合阈值、达芙那 5 次普攻的节奏、声音路径与主流程的让位。
