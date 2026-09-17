@@ -459,6 +459,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         序列期间 check_combat 被抑制(避免大招特写被误判脱战), 所以每一步之间自己做一次
         脱战判断 `_opener_combat_lost()`; 一旦确认敌人没了就中止, 并清掉开场记忆,
         让下一场战斗重新从金 E 开始。
+
+        切人一律走 `_switch_confirmed`(整体重试 + 图像复查): 入场技动画期间当前角色
+        检测可能整段失明(2026-09-17 18:00 实机: 切早雾已生效, 检测却连续 3s 报
+        index=1), 单次 `_switch_to` 失败就裸继续会让后面每一步都在错的角色上空转。
+        任一关键切人重试后仍失败 -> 中止开场, 交回主循环兜底。
         """
         logger.info("four char combo opener start")
         self._set_action_phase("opener")
@@ -470,33 +475,36 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 self._zankou_gold_e()
             aborted = self._opener_combat_lost("gold_e")
 
+            if not aborted and not self._switch_confirmed(self.daffodill):
+                aborted = self._abort_opener("daffodill")
             if not aborted:
-                self._switch_to(self.daffodill)
                 if not self._precombat_daffodill_q_done:
                     self._cast_q(self.daffodill)
                 aborted = self._opener_combat_lost("daffodill")
 
+            if not aborted and not self._switch_confirmed(self.iroi):
+                aborted = self._abort_opener("iroi")
             if not aborted:
-                self._switch_to(self.iroi)
                 self._skill_until_registered(self.iroi)
                 aborted = self._opener_combat_lost("iroi")
 
+            if not aborted and not self._switch_confirmed(self.sakiri):
+                aborted = self._abort_opener("sakiri")
             if not aborted:
-                self._switch_to(self.sakiri)
                 self._cast_q(self.sakiri)
                 self._skill_until_registered(self.sakiri)
                 aborted = self._opener_combat_lost("sakiri")
 
-            if not aborted:
-                self._switch_to(self.zankou)
-                aborted = self._opener_combat_lost("zankou_before_double_q")
+            if not aborted and not self._switch_confirmed(self.zankou):
+                aborted = self._abort_opener("zankou")
             if not aborted:
                 self._zankou_double_q()
                 self._zankou_combo()
                 aborted = self._opener_combat_lost("zankou_double_q")
 
+            if not aborted and not self._switch_confirmed(self.iroi):
+                aborted = self._abort_opener("iroi_funnel")
             if not aborted:
-                self._switch_to(self.iroi)
                 self._iroi_q_funnel()
                 aborted = self._opener_combat_lost("iroi_funnel")
 
@@ -504,12 +512,20 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 target = self._zankou_combo_switch(self.daffodill)
 
         if aborted:
-            logger.info("four char combo opener aborted (combat ended), reset precombat memory")
+            logger.warning(
+                "four char combo opener aborted (combat ended or switch failed), "
+                "reset precombat memory"
+            )
             self._opener_gold_e_done = False
             self._precombat_daffodill_q_done = False
             return
         if target is self.daffodill:
             self._daffodill_until_cycle_full()
+
+    def _abort_opener(self, step):
+        """关键切人重试后仍失败: 中止开场交回主循环, 比在错的角色上空转好."""
+        logger.warning(f"four combo opener abort: switch to {step} failed after retries")
+        return True
 
     def _enemy_present(self):
         """便宜的"敌人还在"信号: boss / Lv / 目标 / 红血条.
@@ -623,6 +639,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             timeout = self.SKILL_REGISTER_TIMEOUT
         if char.has_cd("skill"):
             return True
+        self._wait_entry_skill_if_any()
         if not self.is_in_team():
             self._wait_in_team(timeout=self.CONTROLLABLE_TIMEOUT)
         start = time.time()
@@ -822,7 +839,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             if self._verify_current(char):
                 return True
             logger.warning(
-                f"recover switch to {char} not confirmed ({attempt}/{retries}), retry"
+                f"switch to {char} not confirmed ({attempt}/{retries}), retry"
             )
             self.sleep(0.2)
         return False
@@ -916,11 +933,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         if linger_wait > 0:
             logger.info(f"zankou wait combo linger {linger_wait:.2f}s before hold")
             self.sleep(linger_wait)
-        wait = self._entry_skill_until - time.time()
-        if wait > 0:
-            logger.info(f"zankou wait entry skill {wait:.2f}s before combo")
-            self.sleep(wait)
-        self._entry_skill_until = 0.0
+        self._wait_entry_skill_if_any()
         hold_start = time.time()
         self._holding = True
         self.mouse_down()
@@ -1095,7 +1108,21 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
 
     # ------------------------------------------------------------------ q
 
+    def _wait_entry_skill_if_any(self):
+        """刚切人的角色若预测到入场技(`_entry_skill_until`), 先等它结束再按键.
+
+        入场技期间角色不可控、按键不生效, 且 ult_ready/skill 图标模板 conf 会掉到
+        0.0x(2026-09-17 18:00 实机: 切早雾后立即轮询她的 Q, `conf=0.042` 挂满
+        Q_READY_TIMEOUT=5s, 早雾全程发呆)。等待后清零, 每次入场技只消费一次。
+        """
+        wait = self._entry_skill_until - time.time()
+        if wait > 0:
+            logger.info(f"wait entry skill {wait:.2f}s before acting")
+            self.sleep(wait)
+        self._entry_skill_until = 0.0
+
     def _cast_q(self, char):
+        self._wait_entry_skill_if_any()
         if not self._press_q_ready(char):
             return False
         was_lit = self._q_button_lit()

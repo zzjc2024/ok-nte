@@ -236,6 +236,7 @@ White → Green → Red → Purple → Blue → Yellow → White
 - 二连"松开 → 单击"间隔 0.06s（手动实测 0.14~0.31s，未验证是否偏短）。
 
 **已知限制（暂不改）**
+- **切人确认在"新上场角色入场技期间"可能整段失明（2026-09-17 18:00 实机）**：开场第 4 步切早雾已生效（用户亲眼看到早雾上场），但 `_confirm_switch` 连续 3s 检测报 `want 3, got 1 (reason=active_marker)`（报的是达芙蒂尔），随后裸继续 → 在早雾入场技动画里轮询她的 Q（`ult:False conf=0.042`，图标是灰的）白等 `Q_READY_TIMEOUT=5s`、E 再白按 2s，早雾全程发呆约 20s 直到用户手动关游戏。**已修（2026-09-17）**：① 开场全部切人改走 `_switch_confirmed`（整体重试 + `_verify_current` 复查，检测失明时下一轮重试自然确认）；② 任一关键切人重试后仍失败 → `_abort_opener` 中止开场、重置开场记忆，交回主循环兜底，不再在错的角色上空转；③ `_cast_q` / `_skill_until_registered` / `_hold_until_gold` 统一先 `_wait_entry_skill_if_any()` 等入场技结束再按键（每次只消费一次）。关游戏瞬间报的 `No box found for category Labels.ult_ready` 是框架在无画面时的正常异常，不用管。
 - 双 Q 的 `exit2` 基本确认不了（超时 8s < 全程 ~11s），二连时机不依赖它。
 - 早雾 E 经常放不出来（日志 `Sakiri skill not registered within 2.0s`，`lit=0` / `in_team=False`）。根因是她刚放完 Q 还在大招特写里（`in_team=False`），而按键在特写期间不生效。**已修**：`_wait_controllable` 改成等 Q 冷却**原始数字**开始变小（"图标由亮变灭"只作没有冷却数字时的兜底 —— 实测大招一按下去图标就变灭，但人还在特写里），`_skill_until_registered` 也先 `_wait_in_team` 再按 E，特写期间不浪费按键。
 - 切人确认**两个方向都会错**：漏判（`four combo switch not confirmed, want X, got -1`）和误判（21:01 早雾→残虹 误报 confirmed，见 §5.1）。误判已由 `_verify_current` + 二连前的复查兜住；漏判仍靠重按 3s 兜。

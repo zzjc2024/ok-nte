@@ -245,6 +245,70 @@ class TestFourCharCombo(unittest.TestCase):
 
         self.assertEqual(self.task._last_combo_finished_at, 0.0)
 
+    def test_cast_q_waits_entry_skill_before_pressing(self):
+        # 入场技期间图标是灰的(conf 0.0x): 必须先等入场技结束, 否则白等 Q_READY_TIMEOUT
+        task = self.task
+        task._entry_skill_until = time.time() + 0.4
+        task._press_q_ready = Mock(return_value=False)
+        task._press_q_until_registered = Mock()
+        task._wait_controllable = Mock()
+
+        self.assertFalse(task._cast_q(task.chars[1]))
+
+        entry_waits = [
+            call
+            for call in task.sleep.call_args_list
+            if call.args and isinstance(call.args[0], float) and 0.3 <= call.args[0] <= 0.5
+        ]
+        self.assertEqual(len(entry_waits), 1)
+        self.assertEqual(task._entry_skill_until, 0.0)  # 只消费一次
+        task._press_q_ready.assert_called_once()
+
+    def test_opener_aborts_when_critical_switch_fails(self):
+        # 开场切人重试后仍失败(入场技期间检测失明): 中止开场交回主循环, 不在错角色上空转
+        task = self.task
+        task._suppress_combat_check = False
+        task._opener_gold_e_done = True
+        task._opener_combat_lost = Mock(return_value=False)
+        task._zankou_gold_e = Mock()
+        task._switch_confirmed = Mock(return_value=False)
+        task._cast_q = Mock()
+        task._skill_until_registered = Mock()
+        task._zankou_double_q = Mock()
+        task._zankou_combo = Mock()
+
+        task._opener()
+
+        task._switch_confirmed.assert_called_once_with(task.daffodill)
+        task._cast_q.assert_not_called()
+        task._zankou_double_q.assert_not_called()
+        self.assertFalse(task._opener_gold_e_done)  # 开场记忆已重置
+        self.assertFalse(task._precombat_daffodill_q_done)
+
+    def test_opener_switch_succeeded_before_cast_q(self):
+        # 开场每步: 先切人确认, 再在确认过的角色上放技能
+        task = self.task
+        task._suppress_combat_check = False
+        task._opener_gold_e_done = True
+        task._precombat_daffodill_q_done = False
+        task._opener_combat_lost = Mock(return_value=False)
+        task._zankou_gold_e = Mock()
+        task._switch_confirmed = Mock(return_value=True)
+        task._cast_q = Mock()
+        task._skill_until_registered = Mock()
+        task._zankou_double_q = Mock()
+        task._zankou_combo = Mock()
+        task._zankou_combo_switch = Mock(return_value=task.daffodill)
+        task._iroi_q_funnel = Mock()
+        task._daffodill_until_cycle_full = Mock()
+
+        task._opener()
+
+        self.assertEqual(task._switch_confirmed.call_count, 5)  # 达芙/伊洛伊/早雾/残虹/伊洛伊
+        task._cast_q.assert_any_call(task.daffodill)
+        task._cast_q.assert_any_call(task.sakiri)
+        task._zankou_double_q.assert_called_once()
+
     def test_wait_controllable_needs_raw_cd_to_tick(self):
         # 实测 bug: 大招一按下去 Q 图标就变灭, 但此时还在特写里(in_team=False),
         # 早雾的 E 连按 2s 全废。有冷却数字时必须等原始数字真的变小。
