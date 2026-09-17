@@ -753,7 +753,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     ):
         """长按轮询金 E; 一次超时就切达芙蒂尔上场打一轮, 再切回来重打.
 
-        **不重按**(长按起点由 `_switch_to` 的入场技预测保证), 也**不再用"普通闪避重试"**
+        **不重按**(长按起点不再依赖入场技计时: 预测到入场技时直接按住左键穿过它,
+        控制恢复后蓄力立刻开始, 上限按剩余入场技时间延长), 也**不再用"普通闪避重试"**
         (连按 shift + 动作音确认): 它的收益只是确认角色能动, 负担却是整套闪避状态机
         (2026-09-17 16:46 实机撞车: 成功反击在 `_dodge_until_triggered` 的 sleep 里重入
         执行 6s, 吃光 3s 重试窗口 -> 误报"闪避没确认"异常停任务)。现在:
@@ -941,7 +942,13 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         if linger_wait > 0:
             logger.info(f"zankou wait combo linger {linger_wait:.2f}s before hold")
             self.sleep(linger_wait)
-        self._wait_entry_skill_if_any()
+        # 入场技不再前置等待: 直接按住左键穿过入场技(期间按键不生效但按住状态保留),
+        # 控制一恢复蓄力立刻开始, 不用赌 1.1s 计时准不准。金 E 出现时间 =
+        # 入场技结束 + 0.67~0.9s, 所以下限保持 COMBO_HOLD_MIN、上限按剩余入场技延长。
+        entry_wait = max(0.0, self._entry_skill_until - time.time())
+        if entry_wait > 0:
+            logger.info(f"zankou hold through entry skill ({entry_wait:.2f}s left)")
+        self._entry_skill_until = 0.0
         hold_start = time.time()
         self._holding = True
         self.mouse_down()
@@ -960,7 +967,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 )
                 max_until = start + (
                     self.DODGE_COMBO_HOLD if require_second_gold else self.COMBO_HOLD_MAX
-                )
+                ) + entry_wait
                 while time.time() < max_until:
                     if interrupt_event is not None and interrupt_event.is_set():
                         interrupted = True

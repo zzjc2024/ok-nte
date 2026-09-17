@@ -308,6 +308,25 @@ class TestFourCharCombo(unittest.TestCase):
         task._cast_q.assert_any_call(task.sakiri)
         task._zankou_double_q.assert_called_once()
 
+    def test_hold_starts_during_entry_skill_and_extends_deadline(self):
+        # 入场技不再前置等待: 直接按住穿过, 上限 = COMBO_HOLD_MAX + 剩余入场技时间
+        task = self.task
+        task.COMBO_HOLD_MAX = 0.2
+        task._entry_skill_until = time.time() + 0.5
+        task.find_one = Mock(return_value=None)  # 入场技期间图标是灰的, 一直无金 E
+        task._raise_combo_anomaly = Mock(side_effect=ZankouComboAnomaly("anomaly"))
+        task._recover_on_daffodill = Mock(return_value=True)
+        start = time.time()
+
+        result, _damaged = task._hold_until_gold()
+
+        elapsed = time.time() - start
+        self.assertIs(result, HoldResult.NO_GOLD)
+        self.assertGreaterEqual(elapsed, 0.55)  # 0.2 + 0.5 剩余入场技, 都算进上限
+        self.assertLess(elapsed, 1.5)
+        self.assertEqual(task._entry_skill_until, 0.0)  # 只消费一次
+        task.mouse_down.assert_called_once()  # 没有前置 sleep, 按住立即开始
+
     def test_opener_gold_e_accepts_immediate_gold(self):
         # 开场金E由玩家手动蓄力, 脚本开始长按时金E可能已亮: 不能套用 COMBO_HOLD_MIN 忽略它
         self.task._zankou_hold_with_recovery = Mock(return_value=HoldResult.GOLD)
