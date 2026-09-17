@@ -757,8 +757,18 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                     self._switch_to(self.zankou)
                     damaged = False
                     continue
+                # 切人动画/入场技还没放完时长按会整个落空: 这 0.9s 普攻不生效,
+                # 金 E 全 0 也不掉血(实测 2026-09-17 13:07, 切残虹后 0.13s 就长按)。
+                # 直接判异常会白停任务 -> 先重打几次, 都不行才是真异常。
+                if dodges < self.COMBO_DODGE_RETRY_MAX:
+                    logger.warning(
+                        f"zankou gold E missing while not damaged, retry hold "
+                        f"({dodges}/{self.COMBO_DODGE_RETRY_MAX})"
+                    )
+                    continue
                 self._raise_combo_anomaly(
-                    f"zankou gold E missing while not damaged (hold {self.COMBO_HOLD_MAX}s)"
+                    f"zankou gold E missing while not damaged after "
+                    f"{self.COMBO_DODGE_RETRY_MAX} holds ({self.COMBO_HOLD_MAX}s each)"
                 )
             logger.warning(
                 f"zankou gold E missing but damaged, dodge then retry "
@@ -1375,9 +1385,10 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         with self.skip_sleep_checks() as skip:
             skip.all = True
             if current is not self.zankou:
+                # 只点这一下就返回: E/Q 都能打断闪避反击, 没必要等反击动画放完,
+                # 被打断的代码(放 E / 放 Q / 切人)会立刻接着跑。
                 self._set_action_phase("sound_success_other")
                 self.click(down_time=self.SOUND_SUCCESS_CLICK_DOWN)
-                self.sleep(self.DODGE_COUNTER_WAIT)
                 return
             self._set_action_phase("sound_success")
             while True:
