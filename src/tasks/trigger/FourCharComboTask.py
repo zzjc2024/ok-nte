@@ -94,6 +94,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     DAFFODILL_INDEX = 1
     IROI_INDEX = 2
     SAKIRI_INDEX = 3
+    # 切回残虹的数字快捷键(键盘 1 = 1 号位)。达芙恢复登场期间连点普攻的同时连按它,
+    # 切人 CD 一好(或解除被控)第一时间切回残虹, 避免魔法数字。
+    ZANKOU_SWITCH_KEY = ZANKOU_INDEX + 1
 
     COMBO_HOLD_MIN = 0.67
     COMBO_HOLD_MAX = 0.9
@@ -761,28 +764,50 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             second_gold = False
 
     def _recover_on_daffodill(self):
-        """长按超时后的恢复: 切达芙蒂尔上场打一轮, 再切回残虹.
+        """长按超时后的恢复: 切达芙蒂尔短暂上场 -> 第一时间切回残虹重打二连.
 
-        贴人(切达芙蒂尔)确认不了 = 当前角色大概率被控/切人 CD 没好, 整体重试
-        COMBO_RECOVER_SWITCH_RETRIES 次; 都失败就放弃本轮恢复(返回 False), 让上层
-        计数重试。切回残虹同样走确认重试, 切人 CD 没好时 `_confirm_switch`
-        会自动按到确认为止。
+        **不复用 `_daffodill_window`**(它至少待满 1.5s): 掉血被打断后达芙只需要把
+        受击/被控的窗口熬过去, 应该在切人 CD 一好(或解除被控)的**第一时间**切回,
+        实测她在场上不到 1s。她登场期间: 连点普攻占住输出 + 连按切回残虹的快捷键
+        (`_confirm_switch(attack_while_waiting=True)`, 被控期间按键不生效由确认
+        重试覆盖, 整体重试交给 `_switch_confirmed`)。
+
+        达芙 Q 的时停用法: 她本次登场已经普攻过(等待切回期间连点普攻, 必然成立)
+        且 Q 就绪时, **不在场上直接放**, 而是先切回残虹打一套二连, 再切回达芙放 Q
+        —— 任何角色放 Q 期间关卡计时暂停而游戏继续, 相当于白赚这套二连。
+        放完 Q 再切回残虹, 交回上层重打长按。
         """
         self._set_action_phase("combo_recover_daffodill")
         if not self._switch_confirmed(self.daffodill):
             logger.warning("recover switch to daffodill failed, retry the combo directly")
             return False
-        self._daffodill_window(self.daffodill)
-        self._switch_confirmed(self.zankou)
+        daffodill_q_ready = self.daffodill.ultimate_available()
+        if not self._switch_confirmed(self.zankou, attack_while_waiting=True):
+            logger.warning("recover switch back to zankou failed, retry the combo directly")
+            return False
         self.sleep(self.SWITCH_SETTLE_TIME)
+        self._zankou_combo()
+        if not daffodill_q_ready:
+            return True
+        logger.info(
+            "daffodill ultimate ready: take the zankou combo first, then her Q "
+            "(stage timer pauses during ult)"
+        )
+        if self._switch_confirmed(self.daffodill):
+            self._cast_q(self.daffodill)
+            self._switch_confirmed(self.zankou)
+            self.sleep(self.SWITCH_SETTLE_TIME)
         return True
 
-    def _switch_confirmed(self, char, retries=None):
-        """切人 + 图像复查; 确认不了(被控/切人 CD/高亮误报)就整体重试, 都失败返回 False."""
+    def _switch_confirmed(self, char, retries=None, attack_while_waiting=False):
+        """切人 + 图像复查; 确认不了(被控/切人 CD/高亮误报)就整体重试, 都失败返回 False.
+
+        `attack_while_waiting=True` 时等待期间连点普攻(达芙恢复切回残虹用)。
+        """
         if retries is None:
             retries = self.COMBO_RECOVER_SWITCH_RETRIES
         for attempt in range(1, retries + 1):
-            self._switch_to(char)
+            self._switch_to(char, attack_while_waiting=attack_while_waiting)
             if self._verify_current(char):
                 return True
             logger.warning(
@@ -1411,13 +1436,13 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             )
         return full and adjacent
 
-    def _switch_to(self, char):
+    def _switch_to(self, char, attack_while_waiting=False):
         current = self.get_current_char(raise_exception=False)
         if current is char:
             return
         entry_skill = current is not None and self._switch_triggers_entry_skill(current, char)
         self._wait_in_team(timeout=self.CONTROLLABLE_TIMEOUT)
-        pressed_at = self._confirm_switch(char, current)
+        pressed_at = self._confirm_switch(char, current, attack_while_waiting=attack_while_waiting)
         # 入场技计时锚点必须是 _confirm_switch 里**第一次按下切人键**的时刻
         # (实测以按键为基准: 切人键 -> 长按 = 1.09/1.12s)。不能用本函数入口时刻:
         # 切人前等特写(_wait_in_team 最长 10s)/确认重试都会把窗口整体推后,
@@ -1443,11 +1468,14 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 self.sleep(gap)
         return True
 
-    def _confirm_switch(self, char, current):
-        """等脱离动画后重按切人键, 直到图像确认目标角色上场; 不做额外点击.
+    def _confirm_switch(self, char, current, attack_while_waiting=False):
+        """等脱离动画后重按切人键, 直到图像确认目标角色上场.
 
         不采信框架 `_switch_to_char` 的 active health change (会误报)。
         要求目标高亮**连续稳定 SWITCH_CONFIRM_STABLE 秒**才算确认, 过滤切换动画里的瞬态高亮。
+
+        `attack_while_waiting=True` 时等待期间连点普攻(达芙恢复切回残虹用:
+        她在场上的每一刻都在输出, 同时连按切回键, 切人 CD 一好立即切回)。
 
         返回**第一次按下切人键**的时刻(入场技计时锚点); 一次都没按或未确认返回 0.0。
         游戏接受的是第一次有效按压, 后续重按是空按, 所以锚点取首按。
@@ -1476,8 +1504,10 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                     stable_since = 0.0
                 if first_press_at == 0.0:
                     first_press_at = time.time()
+                if attack_while_waiting:
+                    self.click()
                 self.send_key(
-                    char.index + 1,
+                    self._switch_key(char),
                     action_name="four_combo_switch",
                     interval=0.2,
                     down_time=0.05,
@@ -1489,3 +1519,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             f"(reason={detection.reason if detection else None})"
         )
         return 0.0
+
+    def _switch_key(self, char):
+        """切人数字快捷键: 键盘 1~4 对应 1~4 号位 (残虹 = `ZANKOU_SWITCH_KEY`)."""
+        if char is self.zankou:
+            return self.ZANKOU_SWITCH_KEY
+        return char.index + 1

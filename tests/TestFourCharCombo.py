@@ -243,27 +243,65 @@ class TestFourCharCombo(unittest.TestCase):
         char.send_skill_key.assert_not_called()
         self.task._wait_in_team.assert_called_once()
 
-    def test_recovery_switch_retried_when_not_confirmed(self):
-        # 贴人确认不了 = 角色被控/切人 CD 没好: 整体重试, 成功后照常上场打一轮再切回
-        self.task._switch_to = Mock()
-        self.task._verify_current = Mock(side_effect=[False, False, True, True])
-        self.task._daffodill_window = Mock()
-        self.task.sleep = Mock()
-
-        self.assertTrue(self.task._recover_on_daffodill())
-
-        self.assertEqual(self.task._switch_to.call_count, 4)  # 达芙3次(2次重试) + 切回残虹
-        self.task._daffodill_window.assert_called_once()
-
-    def test_recovery_gives_up_when_switch_never_confirmed(self):
+    def test_recovery_switch_back_fails_gives_up(self):
         self.task._switch_to = Mock()
         self.task._verify_current = Mock(return_value=False)
-        self.task._daffodill_window = Mock()
+        self.task._zankou_combo = Mock()
         self.task.sleep = Mock()
 
         self.assertFalse(self.task._recover_on_daffodill())
 
-        self.task._daffodill_window.assert_not_called()  # 人不在达芙身上, 不能盲打
+        self.task._zankou_combo.assert_not_called()
+
+    def test_recovery_switches_back_fast_without_daffodill_window(self):
+        # 达芙恢复登场不复用 _daffodill_window(至少1.5s): 普攻+连按切回键, 第一时间切回
+        self.task._switch_to = Mock()
+        self.task._verify_current = Mock(return_value=True)
+        self.task._zankou_combo = Mock()
+        self.task._cast_q = Mock()
+        self.task.sleep = Mock()
+        self.task.chars[1].ultimate_available = Mock(return_value=False)
+
+        self.assertTrue(self.task._recover_on_daffodill())
+
+        self.assertEqual(self.task._switch_to.call_count, 2)  # 达芙进 + 切回残虹
+        self.task._switch_to.assert_called_with(self.task.zankou, attack_while_waiting=True)
+        self.task._zankou_combo.assert_called_once()
+        self.task._cast_q.assert_not_called()
+
+    def test_recovery_takes_combo_before_daffodill_q(self):
+        # 达芙Q时停: 先切回残虹吃一套二连, 再切回达芙放Q, 最后切回残虹
+        self.task._switch_to = Mock()
+        self.task._verify_current = Mock(return_value=True)
+        self.task._zankou_combo = Mock()
+        self.task._cast_q = Mock()
+        self.task.sleep = Mock()
+        self.task.chars[1].ultimate_available = Mock(return_value=True)
+
+        self.assertTrue(self.task._recover_on_daffodill())
+
+        self.assertEqual(self.task._switch_to.call_count, 4)  # 达芙进/切回/再进/再切回
+        self.task._zankou_combo.assert_called_once()
+        self.task._cast_q.assert_called_once_with(self.task.daffodill)
+
+    def test_recovery_q_branch_skipped_when_switch_back_fails(self):
+        # 切回残虹失败(被控): 不打二连也不放Q, 直接放弃本轮
+        self.task._switch_to = Mock()
+        self.task._verify_current = Mock(side_effect=[True, False, False, False])
+        self.task._zankou_combo = Mock()
+        self.task._cast_q = Mock()
+        self.task.sleep = Mock()
+        self.task.chars[1].ultimate_available = Mock(return_value=True)
+
+        self.assertFalse(self.task._recover_on_daffodill())
+
+        self.task._zankou_combo.assert_not_called()
+        self.task._cast_q.assert_not_called()
+
+    def test_switch_key_maps_zankou_to_named_constant(self):
+        self.assertEqual(self.task.ZANKOU_SWITCH_KEY, 1)
+        self.assertEqual(self.task._switch_key(self.task.zankou), self.task.ZANKOU_SWITCH_KEY)
+        self.assertEqual(self.task._switch_key(self.task.chars[3]), 4)
 
     def test_dodge_success_reaction_defers_to_active_hold(self):
         self.task._holding = True
@@ -397,6 +435,21 @@ class TestSwitchEntrySkillAnchor(unittest.TestCase):
 
         self.assertEqual(task._confirm_switch(task.chars[1], task.chars[0]), 0.0)
 
+    def test_confirm_switch_clicks_while_waiting(self):
+        # attack_while_waiting: 达芙在场等待切回期间连点普攻
+        task = self.task
+        task.SWITCH_CONFIRM_TIMEOUT = 3.0
+        task.SWITCH_CONFIRM_STABLE = 0.0
+        task.click = Mock()
+        det_pending = Mock(accepted=False, index=1, reason="pending")
+        det_ok = Mock(accepted=True, index=1, reason="ok")
+        task._get_current_char_detection = Mock(side_effect=[det_pending, det_ok])
+
+        pressed_at = task._confirm_switch(task.chars[1], task.chars[0], attack_while_waiting=True)
+
+        self.assertGreater(pressed_at, 0.0)
+        task.click.assert_called_once()  # 确认前正好一次普攻
+
     def test_entry_skill_window_anchored_at_first_press(self):
         task = self.task
         pressed_at = time.time() - 0.5
@@ -412,7 +465,9 @@ class TestSwitchEntrySkillAnchor(unittest.TestCase):
             pressed_at + task.ZANKOU_ENTRY_SKILL_WAIT,
             places=6,
         )
-        task._confirm_switch.assert_called_once_with(task.chars[1], task.chars[0])
+        task._confirm_switch.assert_called_once_with(
+            task.chars[1], task.chars[0], attack_while_waiting=False
+        )
 
     def test_entry_skill_window_cleared_without_prediction(self):
         task = self.task
