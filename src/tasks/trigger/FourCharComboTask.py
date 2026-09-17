@@ -133,7 +133,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     Q_REGISTER_TIMEOUT = 3.0
     Q_DOUBLE_TIMEOUT = 8.0
     Q_PRESS_INTERVAL = 0.12
-    ENTRY_SKILL_WAIT = 1.1
+    # 残虹入场技(连携登场技)实测时长: 切人键按下 -> 可以长按 = 1.09/1.12s。
+    # 入场技时长因角色而异, 此值只用于残虹, 不要挪给其他角色的等待。
+    ZANKOU_ENTRY_SKILL_WAIT = 1.1
+    # 按下 Q 后等大招特写开始(is_in_team 变 False)的窗口, 与入场技时长无关。
+    Q_CUTSCENE_START_WAIT = 1.1
     SWITCH_SETTLE_TIME = 0.1
     SUPPRESS_SWITCH_CLICK = True
     SWITCH_CONFIRM_TIMEOUT = 3.0
@@ -261,6 +265,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     def _reset_precombat(self):
         self._opener_gold_e_done = False
         self._precombat_daffodill_q_done = False
+        self._entry_skill_until = 0.0
         self._action_phase = ""
         self._suppress_combat_check = False
         self._alert_interrupt.clear()
@@ -1020,7 +1025,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             return
         if not self._press_q_ready(zankou):
             return
-        self._wait_in_team(timeout=self.ENTRY_SKILL_WAIT)
+        self._wait_in_team(timeout=self.Q_CUTSCENE_START_WAIT)
         deadline = time.time() + self.Q_DOUBLE_TIMEOUT
         with self.skip_sleep_checks() as skip:
             skip.check_combat = True
@@ -1434,7 +1439,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             logger.info(
                 f"four combo entry skill expected: {current}({current.element}) -> "
                 f"{char}({char.element}), cycle_ratio={self.cycle_ratio():.2f}, "
-                f"wait {self.ENTRY_SKILL_WAIT}s"
+                f"wait {self.ZANKOU_ENTRY_SKILL_WAIT}s"
             )
         return full and adjacent
 
@@ -1443,11 +1448,15 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         if current is char:
             return
         entry_skill = current is not None and self._switch_triggers_entry_skill(current, char)
-        # 入场技计时从"按下切人键"算起 (手动实测: 切人键 -> 长按 = 1.09/1.12s)
-        started = time.time()
         self._wait_in_team(timeout=self.CONTROLLABLE_TIMEOUT)
-        self._confirm_switch(char, current)
-        self._entry_skill_until = started + self.ENTRY_SKILL_WAIT if entry_skill else 0.0
+        pressed_at = self._confirm_switch(char, current)
+        # 入场技计时锚点必须是 _confirm_switch 里**第一次按下切人键**的时刻
+        # (实测以按键为基准: 切人键 -> 长按 = 1.09/1.12s)。不能用本函数入口时刻:
+        # 切人前等特写(_wait_in_team 最长 10s)/确认重试都会把窗口整体推后,
+        # 长按会落在入场技中间 -> 金 E 全空 -> 误报状态异常(实机踩过)。
+        self._entry_skill_until = (
+            pressed_at + self.ZANKOU_ENTRY_SKILL_WAIT if entry_skill and pressed_at else 0.0
+        )
 
     def _verify_current(self, char, samples=2, gap=0.05):
         """关键节点复查当前角色: 重新做图像检测(绕过 sticky tracker), 连续 samples 次命中才算.
@@ -1471,11 +1480,15 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
 
         不采信框架 `_switch_to_char` 的 active health change (会误报)。
         要求目标高亮**连续稳定 SWITCH_CONFIRM_STABLE 秒**才算确认, 过滤切换动画里的瞬态高亮。
+
+        返回**第一次按下切人键**的时刻(入场技计时锚点); 一次都没按或未确认返回 0.0。
+        游戏接受的是第一次有效按压, 后续重按是空按, 所以锚点取首按。
         """
         start = time.time()
         deadline = start + self.SWITCH_CONFIRM_TIMEOUT
         detection = None
         stable_since = 0.0
+        first_press_at = 0.0
         with self.skip_sleep_checks() as skip:
             skip.check_combat = True
             while time.time() < deadline:
@@ -1490,9 +1503,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                         logger.info(
                             f"four combo switch confirmed -> {char} in {time.time() - start:.2f}s"
                         )
-                        return True
+                        return first_press_at
                 else:
                     stable_since = 0.0
+                if first_press_at == 0.0:
+                    first_press_at = time.time()
                 self.send_key(
                     char.index + 1,
                     action_name="four_combo_switch",
@@ -1505,4 +1520,4 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             f"got {detection.index if detection else None} "
             f"(reason={detection.reason if detection else None})"
         )
-        return False
+        return 0.0

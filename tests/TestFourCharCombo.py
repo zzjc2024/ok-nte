@@ -1,7 +1,7 @@
 import threading
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from src.combat.BaseCombatTask import SleepCheckSkip
 from src.tasks.trigger.FourCharComboTask import (
@@ -313,6 +313,120 @@ class TestFourCharCombo(unittest.TestCase):
 
         self.assertIs(result, HoldResult.GOLD)
         self.assertFalse(damaged)
+
+
+class TestSwitchEntrySkillAnchor(unittest.TestCase):
+    """回归: 入场技计时锚点必须是第一次按下切人键, 不是 _switch_to 入口时刻.
+
+    实机踩过: 切人前等特写(_wait_in_team 最长 10s)/确认重试把窗口整体推后,
+    长按落在入场技中间 -> 金 E 全空 -> 误报状态异常停任务。
+    """
+
+    def setUp(self):
+        task = object.__new__(FourCharComboTask)
+        task.sleep_check_skip = SleepCheckSkip()
+        task._entry_skill_until = 0.0
+        task.send_key = Mock()
+        task.sleep = Mock()
+        task.chars = [Mock(index=index) for index in range(4)]
+        task._set_current_char = Mock()
+        # frame/team_size 是只读 property; bare 实例没有截图栈, 类级别替换成普通值
+        for target, value in ((FourCharComboTask, "frame"), (FourCharComboTask, "team_size")):
+            patcher = patch.object(target, value, None if value == "frame" else 4)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.task = task
+
+    def test_confirm_switch_returns_first_press_time(self):
+        task = self.task
+        task.SWITCH_CONFIRM_TIMEOUT = 3.0
+        task.SWITCH_CONFIRM_STABLE = 0.0
+        det_pending = Mock(accepted=False, index=-1, reason="pending")
+        det_ok = Mock(accepted=True, index=1, reason="ok")
+        task._get_current_char_detection = Mock(side_effect=[det_pending, det_ok])
+        before = time.time()
+
+        pressed_at = task._confirm_switch(task.chars[1], task.chars[0])
+
+        after = time.time()
+        self.assertGreater(pressed_at, 0.0)
+        self.assertGreaterEqual(pressed_at, before)
+        self.assertLessEqual(pressed_at, after)
+        task.send_key.assert_called_once()  # 一次按压后确认, 锚点就是这一按
+
+    def test_confirm_switch_without_press_returns_zero(self):
+        # 检测在按压前就稳定确认(切人早已发生) -> 无锚点, 返回 0
+        task = self.task
+        task.SWITCH_CONFIRM_TIMEOUT = 3.0
+        task.SWITCH_CONFIRM_STABLE = 0.0
+        task._get_current_char_detection = Mock(
+            return_value=Mock(accepted=True, index=1, reason="ok")
+        )
+
+        self.assertEqual(task._confirm_switch(task.chars[1], task.chars[0]), 0.0)
+        task.send_key.assert_not_called()
+
+    def test_confirm_switch_timeout_returns_zero(self):
+        task = self.task
+        task.SWITCH_CONFIRM_TIMEOUT = 0.0
+        task._get_current_char_detection = Mock(
+            return_value=Mock(accepted=False, index=-1, reason="pending")
+        )
+
+        self.assertEqual(task._confirm_switch(task.chars[1], task.chars[0]), 0.0)
+
+    def test_entry_skill_window_anchored_at_first_press(self):
+        task = self.task
+        pressed_at = time.time() - 0.5
+        task.get_current_char = Mock(return_value=task.chars[0])
+        task._switch_triggers_entry_skill = Mock(return_value=True)
+        task._wait_in_team = Mock()
+        task._confirm_switch = Mock(return_value=pressed_at)
+
+        task._switch_to(task.chars[1])
+
+        self.assertAlmostEqual(
+            task._entry_skill_until,
+            pressed_at + task.ZANKOU_ENTRY_SKILL_WAIT,
+            places=6,
+        )
+        task._confirm_switch.assert_called_once_with(task.chars[1], task.chars[0])
+
+    def test_entry_skill_window_cleared_without_prediction(self):
+        task = self.task
+        task.get_current_char = Mock(return_value=task.chars[0])
+        task._switch_triggers_entry_skill = Mock(return_value=False)
+        task._wait_in_team = Mock()
+        task._confirm_switch = Mock(return_value=time.time())
+
+        task._switch_to(task.chars[1])
+
+        self.assertEqual(task._entry_skill_until, 0.0)
+
+    def test_entry_skill_window_cleared_when_switch_not_confirmed(self):
+        task = self.task
+        task.get_current_char = Mock(return_value=task.chars[0])
+        task._switch_triggers_entry_skill = Mock(return_value=True)
+        task._wait_in_team = Mock()
+        task._confirm_switch = Mock(return_value=0.0)
+
+        task._switch_to(task.chars[1])
+
+        self.assertEqual(task._entry_skill_until, 0.0)
+
+    def test_reset_precombat_clears_entry_skill_window(self):
+        task = self.task
+        task._opener_gold_e_done = True
+        task._precombat_daffodill_q_done = True
+        task._entry_skill_until = time.time() + 5
+        task._alert_interrupt = threading.Event()
+        task._dodge_motion_heard = threading.Event()
+        task._dodge_success_heard = threading.Event()
+
+        task._reset_precombat()
+
+        self.assertEqual(task._entry_skill_until, 0.0)
+        self.assertFalse(task._opener_gold_e_done)
 
 
 if __name__ == "__main__":
