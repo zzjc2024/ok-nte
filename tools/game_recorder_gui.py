@@ -1,3 +1,12 @@
+"""GUI recorder for the *default output device* loopback (what you hear).
+
+Note: this is NOT the same track SoundListener hears. SoundListener uses WASAPI
+*process* loopback (HTGame.exe only), whose level/mix differs (measured: the same
+template scores 0.459 on a device recording vs 0.14~0.23 in the live app), so
+thresholds calibrated from these recordings are ~2x too high. Use
+tools/record_process_audio.cmd when calibrating sound trigger thresholds.
+"""
+
 import sys
 import os
 import ctypes
