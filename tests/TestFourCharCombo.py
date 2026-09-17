@@ -306,7 +306,67 @@ class TestFourCharCombo(unittest.TestCase):
         self.assertEqual(task._switch_confirmed.call_count, 5)  # 达芙/伊洛伊/早雾/残虹/伊洛伊
         task._cast_q.assert_any_call(task.daffodill)
         task._cast_q.assert_any_call(task.sakiri)
+        task._skill_until_registered.assert_called_once_with(task.iroi)  # 早雾不再按 E
         task._zankou_double_q.assert_called_once()
+        task._zankou_combo.assert_called_once_with(
+            max_hold_extra=task.ZANKOU_DOUBLE_Q_HOLD_EXTRA
+        )
+
+    def test_fixed_step_passes_hold_extra_only_after_double_q(self):
+        task = self.task
+        task._q_button_lit = Mock(return_value=False)
+        task.get_current_char = Mock(return_value=task.zankou)
+        task._zankou_double_q = Mock()
+        task._zankou_combo_switch = Mock(return_value=task.daffodill)
+
+        task.chars[0].ultimate_available = Mock(return_value=True)
+        task._zankou_q_remaining = Mock(return_value=0.0)
+        task._zankou_fixed_step()
+        self.assertEqual(
+            task._zankou_combo_switch.call_args.kwargs["max_hold_extra"],
+            task.ZANKOU_DOUBLE_Q_HOLD_EXTRA,
+        )
+
+        task.chars[0].ultimate_available = Mock(return_value=False)
+        task._zankou_q_remaining = Mock(return_value=20.0)  # CD 还长, 不等不放
+        task._zankou_fixed_step()
+        self.assertEqual(task._zankou_combo_switch.call_args.kwargs["max_hold_extra"], 0.0)
+
+    def test_double_q_recovery_needs_only_animation_end(self):
+        # 第2段动画结束(in_team 稳定)即可提前长按, 不再等大招 CD 解冻
+        task = self.task
+        task.ANIMATION_STABLE_TIME = 0.0
+        task.is_in_team = Mock(return_value=True)
+        task._raw_ultimate_cd = Mock(return_value=20.0)  # CD 凝固不变也不拦
+
+        self.assertTrue(task._wait_double_q_recovery(stage=3))
+
+    def test_daffodill_window_casts_q_on_entry(self):
+        # 达芙Q进场就放: 她是刚从残虹二连切过来的, 符合"先二连马上切人放Q"
+        task = self.task
+        daffodill = task.chars[1]
+        daffodill.ultimate_available = Mock(return_value=True)
+        task._cast_q = Mock()
+        task.click = Mock()
+
+        task._daffodill_window(daffodill)
+
+        task._cast_q.assert_called_once_with(daffodill)
+        daffodill.skill_available.assert_not_called()  # 放完 Q 直接切残虹, 不再普攻
+
+    def test_daffodill_window_attacks_when_q_not_ready(self):
+        task = self.task
+        daffodill = task.chars[1]
+        daffodill.ultimate_available = Mock(return_value=False)
+        daffodill.skill_available = Mock(return_value=False)
+        task._cast_q = Mock()
+        task.in_combat = Mock(side_effect=[True, False])  # 第二圈就退出
+        task.click = Mock()
+
+        task._daffodill_window(daffodill)
+
+        task._cast_q.assert_not_called()
+        self.assertGreaterEqual(task.click.call_count, 1)
 
     def test_hold_starts_during_entry_skill_and_extends_deadline(self):
         # 入场技不再前置等待: 直接按住穿过, 上限 = COMBO_HOLD_MAX + 剩余入场技时间
@@ -326,6 +386,22 @@ class TestFourCharCombo(unittest.TestCase):
         self.assertLess(elapsed, 1.5)
         self.assertEqual(task._entry_skill_until, 0.0)  # 只消费一次
         task.mouse_down.assert_called_once()  # 没有前置 sleep, 按住立即开始
+
+    def test_precombat_gold_e_skips_current_char_gate(self):
+        # 金E模板是残虹专属, 匹配到即说明她在场: 不做多一次当前角色检测拖慢响应
+        task = self.task
+        task._opener_gold_e_done = False
+        task.get_current_char = Mock(return_value="Daffodill")  # 即使检测报错角色也不拦
+        task._skill_until_registered = Mock()
+        task._switch_to = Mock()
+        task._precombat_daffodill_q = Mock()
+        task.find_one = Mock(return_value=Mock(confidence=0.9))
+
+        task._precombat_gold_e()
+
+        task.get_current_char.assert_not_called()
+        self.assertTrue(task._opener_gold_e_done)
+        task._switch_to.assert_called_once_with(task.daffodill)
 
     def test_opener_gold_e_accepts_immediate_gold(self):
         # 开场金E由玩家手动蓄力, 脚本开始长按时金E可能已亮: 不能套用 COMBO_HOLD_MIN 忽略它

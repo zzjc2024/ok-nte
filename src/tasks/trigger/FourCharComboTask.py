@@ -117,6 +117,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     # 完成 >= 该值, 由 `_hold_until_gold` 开头显式补足(`_last_combo_finished_at`),
     # 不依赖"达芙 Q 施放刚好够长"这类各路径的时序巧合。
     ZANKOU_COMBO_LINGER_TIME = 1.5
+    # 双 Q 二连的提前长按: 第 2 段动画一结束就开始按住(此时 CD 可能还凝固), 金 E 要等
+    # 控制恢复后蓄力 0.67~0.9s 才出现, 实测 stage=3 -> CD 跳动 ≈ 3.08s, 上限按此延长。
+    ZANKOU_DOUBLE_Q_HOLD_EXTRA = 3.0
     HEALTH_DROP_RATIO = 0.02
     HEALTH_DROP_MIN_PIXELS = 4
     # 金 E(真金) vs 白/蓄力: 录屏逐帧证据(logs/证据.mp4) —— 金 0.71~0.88, 白/蓄力 0.42~0.61,
@@ -305,14 +308,14 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         """入战前只轮询金 E(不做任何键鼠操作); 检测到金 E 才按 E 切达芙蒂尔并放 Q.
 
         长按由玩家自己预判操作, 脚本不知道何时开始长按, 因此这里只做检测,
-        绝不主动 mouse_down / click / 切人。
+        绝不主动 mouse_down / click / 切人。不做 get_current_char 前置门:
+        金 E 模板是残虹专属, 匹配到本身就说明她在场, 多一次检测只会拖慢响应
+        (触发周期 0.1s, 每个周期里入战检测已经够重了)。
         """
         if self._opener_gold_e_done:
             self._precombat_daffodill_q()
             return
         if len(self.chars) < 4 and not self.load_chars():
-            return
-        if self.get_current_char(raise_exception=False) is not self.zankou:
             return
         box = self.find_one(Labels.zankou_skill_gold, threshold=0.0)
         conf = box.confidence if box else 0.0
@@ -492,15 +495,15 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             if not aborted and not self._switch_confirmed(self.sakiri):
                 self._raise_combo_anomaly("opener switch to sakiri failed after retries")
             if not aborted:
+                # 早雾只放 Q 不放 E(2026-09-17 改): 放完 Q 直接切残虹衔接双 Q
                 self._cast_q(self.sakiri)
-                self._skill_until_registered(self.sakiri)
                 aborted = self._opener_combat_lost("sakiri")
 
             if not aborted and not self._switch_confirmed(self.zankou):
                 self._raise_combo_anomaly("opener switch to zankou failed after retries")
             if not aborted:
                 self._zankou_double_q()
-                self._zankou_combo()
+                self._zankou_combo(max_hold_extra=self.ZANKOU_DOUBLE_Q_HOLD_EXTRA)
                 aborted = self._opener_combat_lost("zankou_double_q")
 
             if not aborted and not self._switch_confirmed(self.iroi):
@@ -590,12 +593,15 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             f"zankou fixed step q_available={q_available} q_cd={q_remaining:.2f} "
             f"lit={self._q_button_lit()} current={self.get_current_char(raise_exception=False)}"
         )
+        max_hold_extra = 0.0
         if q_available:
             self._zankou_double_q()
+            max_hold_extra = self.ZANKOU_DOUBLE_Q_HOLD_EXTRA
         elif 0 < q_remaining < self.ZANKOU_Q_READY_WINDOW:
             self._stay_until_q_ready(zankou)
             self._zankou_double_q()
-        return self._zankou_combo_switch(self.daffodill)
+            max_hold_extra = self.ZANKOU_DOUBLE_Q_HOLD_EXTRA
+        return self._zankou_combo_switch(self.daffodill, max_hold_extra=max_hold_extra)
 
     def _daffodill_until_cycle_full(self):
         daffodill = self.daffodill
@@ -607,9 +613,18 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 return
 
     def _daffodill_window(self, daffodill):
-        """达芙蒂尔在场窗口: E 能放就放(非阻塞), 到 DAFFODILL_FIELD_TIME 或 Q 可用后离开."""
+        """达芙蒂尔在场窗口.
+
+        Q **进场就放**(2026-09-17 改): 她是从"残虹二连"刚切过来的, 正好符合
+        "先打一套二连 -> 马上切该角色放 Q"(Q 长动画期间白赚二连的 1.5s 残留输出),
+        不能等在场打了一阵才放。没有 Q 才放 E, 然后普攻到 DAFFODILL_FIELD_TIME;
+        场上期间 Q 转好也立即放(放完同样马上切残虹)。
+        """
         self._set_action_phase("daffodill_window")
         start = time.time()
+        if daffodill.ultimate_available():
+            self._cast_q(daffodill)
+            return
         if daffodill.skill_available():
             self._skill_until_registered(daffodill, self.DAFFODILL_SKILL_REGISTER_TIMEOUT)
         while self.in_combat():
@@ -702,8 +717,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             return
         self._skill_until_registered(self.zankou)
 
-    def _zankou_combo(self):
-        """残虹二连: 长按轮询金E -> 松开 -> 单击左键 (间隔见 COMBO_* 常量)."""
+    def _zankou_combo(self, max_hold_extra=0.0):
+        """残虹二连: 长按轮询金E -> 松开 -> 单击左键 (间隔见 COMBO_* 常量).
+
+        `max_hold_extra`: 双 Q 后提前长按时延长上限(动画尾 + CD 解冻前蓄力不开始)。
+        """
         if self._zankou_combo_recently_done():
             logger.info(
                 "zankou combo skipped: sound path already ran it "
@@ -711,7 +729,10 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             )
             return
         self._set_action_phase("zankou_combo")
-        if self._zankou_hold_with_recovery() is HoldResult.HANDLED:
+        if (
+            self._zankou_hold_with_recovery(max_hold_extra=max_hold_extra)
+            is HoldResult.HANDLED
+        ):
             return
         self.sleep(self.COMBO_RELEASE_GAP)
         self.click()
@@ -749,7 +770,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         return False
 
     def _zankou_hold_with_recovery(
-        self, interrupt_event=None, require_second_gold=False, min_hold=None
+        self, interrupt_event=None, require_second_gold=False, min_hold=None,
+        max_hold_extra=0.0,
     ):
         """长按轮询金 E; 一次超时就切达芙蒂尔上场打一轮, 再切回来重打.
 
@@ -774,6 +796,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 interrupt_event=interrupt_event,
                 require_second_gold=second_gold,
                 min_hold=min_hold,
+                max_hold_extra=max_hold_extra,
             )
             if result is HoldResult.DODGE:
                 if self._recover_from_dodge():
@@ -884,17 +907,18 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self.disable()
         raise ZankouComboAnomaly(message)
 
-    def _zankou_combo_switch(self, default_target):
+    def _zankou_combo_switch(self, default_target, max_hold_extra=0.0):
         """切残虹二连, 再按环合值决定去向.
 
         环合 >= CYCLE_STAY_RATIO 时不再和达芙蒂尔互切: 留在残虹身上连点左键直到环合满,
-        然后切伊洛伊; 否则切 default_target。
+        然后切伊洛伊; 否则切 default_target。`max_hold_extra` 透传给二连长按
+        (双 Q 后的提前长按延长上限用)。
         """
         self._set_action_phase("zankou_enter")
         self._switch_to(self.zankou)
         # 切人刚确认时角色还在切人动画里, 立刻长按普攻不生效 (实测确认后 0.001s 就长按, 金 E 全空)
         self.sleep(self.SWITCH_SETTLE_TIME)
-        self._zankou_combo()
+        self._zankou_combo(max_hold_extra=max_hold_extra)
         ratio = self.cycle_ratio()
         if ratio >= self.CYCLE_STAY_RATIO:
             logger.info(
@@ -917,7 +941,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         logger.info(f"four char combo cycle full ratio={self.cycle_ratio():.2f}")
 
     def _hold_until_gold(
-        self, interrupt_event=None, require_second_gold=False, min_hold=None
+        self, interrupt_event=None, require_second_gold=False, min_hold=None,
+        max_hold_extra=0.0,
     ):
         """长按轮询金 E; 返回 (HoldResult, damaged).
 
@@ -967,7 +992,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 )
                 max_until = start + (
                     self.DODGE_COMBO_HOLD if require_second_gold else self.COMBO_HOLD_MAX
-                ) + entry_wait
+                ) + entry_wait + max_hold_extra
                 while time.time() < max_until:
                     if interrupt_event is not None and interrupt_event.is_set():
                         interrupted = True
@@ -1051,9 +1076,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         """残虹双 Q.
 
         连按 Q, 依次确认四个阶段: 第1段进特写 -> 第1段出特写 -> 第2段进特写 -> 第2段出特写。
-        之后**不能立刻二连**: 必须等到"第 2 段 Q 动画结束"且"Q 冷却数字真正开始变小"
-        两个条件同时成立 (见 `_wait_double_q_recovery`), 否则长按会落在动画/收招里,
-        普攻不生效, E 不会变金, 二连接不上。
+        第 2 段动画结束(in_team 稳定回来)就可以**提前长按**, 不再等大招 CD 解冻——
+        此时按住左键, 控制恢复后蓄力自动开始, 金 E 出现再松手点按完成二连
+        (与入场技衔接二连同一套逻辑)。紧随其后的 `_zankou_combo` 必须带
+        `max_hold_extra=ZANKOU_DOUBLE_Q_HOLD_EXTRA`(调用方负责), 覆盖"动画尾 +
+        CD 解冻前蓄力不开始"的全程。
         """
         self._set_action_phase("zankou_double_q")
         zankou = self.zankou
@@ -1338,23 +1365,21 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         return cds["ultimate"] if cds else 0.0
 
     def _wait_double_q_recovery(self, stage):
-        """等二连可以长按的时机; 两个条件必须同时成立.
+        """等"第 2 段 Q 动画结束"就返回, 不再等大招 CD 解冻.
 
         1. **第 2 段** Q 的动画结束: 必须确认过 `enter2` (stage >= 3), 不能拿第 1 段的结束
            当数; 且 HUD (`is_in_team`) 要稳定回来, 排除特写期间的状态抖动。
-        2. Q 冷却**原始数字**真正变小: 游戏在 Q 动画期间把冷却数字冻结在满值,
-           所以数字开始变小 = 动画结束、冷却开始计时。
-
-        实测依据: 长按比正确时机早约 2s 时, 2.0s 长按全程落在动画/收招里,
-        普攻完全不生效, 金 E 检测 `best conf=0.000`, 二连接不上。
+        2. ~~Q 冷却原始数字变小~~ **已删(2026-09-17 晚)**: 二连改为提前长按——动画一结束
+           就按住左键, 此时 CD 可能还凝固不变, 蓄力在控制恢复后自动开始, 金 E 出现再
+           松手点按。长按上限按 `ZANKOU_DOUBLE_Q_HOLD_EXTRA` 延长, 覆盖"动画尾 +
+           蓄力"的全程, 不用赌 CD 解冻时刻(实测 stage=3 -> cd 跳动 ≈ 3.08s)。
         """
         if stage < 3:
             logger.warning(
                 f"zankou double q recovery: enter2 not confirmed (stage={stage}), "
-                f"still waiting for in_team + cd"
+                f"still waiting for in_team"
             )
         start = time.time()
-        baseline = None
         in_team_since = None
         last_log = 0.0
         with self.skip_sleep_checks() as skip:
@@ -1366,33 +1391,26 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                         in_team_since = now
                 else:
                     in_team_since = None
-                raw = self._raw_ultimate_cd()
-                if raw > 0 and baseline is None:
-                    baseline = raw
                 if now - last_log >= 1.0:
                     last_log = now
                     logger.info(
                         f"zankou double q recovery t={now - start:.2f}s "
-                        f"in_team={bool(self.is_in_team())} cd_raw={raw:.1f} "
-                        f"baseline={baseline}"
+                        f"in_team={bool(self.is_in_team())}"
                     )
-                in_team_ok = (
+                if (
                     in_team_since is not None
                     and now - in_team_since >= self.ANIMATION_STABLE_TIME
-                )
-                cd_ok = raw > 0 and baseline is not None and raw < baseline - 0.001
-                if in_team_ok and cd_ok:
+                ):
                     logger.info(
-                        f"zankou combo ready in {now - start:.2f}s "
-                        f"(stage={stage}, cd_raw {baseline:.1f} -> {raw:.1f})"
+                        f"zankou double q animation done in {now - start:.2f}s "
+                        f"(stage={stage}), start the hold early and wait for gold"
                     )
                     return True
                 self.sleep(self.SCRIPT_TICK)
         self._dump_q_cd_state("combo_ready_timeout")
         logger.warning(
-            f"wait zankou combo ready timeout (stage={stage}, "
-            f"in_team={bool(self.is_in_team())}, "
-            f"cd_raw={self._raw_ultimate_cd():.1f}, baseline={baseline})"
+            f"wait zankou double q animation timeout (stage={stage}, "
+            f"in_team={bool(self.is_in_team())})"
         )
         return False
 
