@@ -13,10 +13,10 @@ class ZankouComboHotkeyTask(BaseCombatTask, TriggerTask):
     """按 F12 打一次残虹二连 (手动辅助, 不跑自动循环).
 
     序列:
-    1. 按 1 切残虹(不管当前是谁, 按 1 没有负面效果), 等 0.1s;
-       顺便查一下当前角色是不是残虹, 不是就再按一次 1 再等 0.1s。
+    1. 按 1 切残虹(不管当前是谁, 按 1 没有负面效果), 等 0.05s;
+       顺便查一下当前角色是不是残虹, 不是就再按一次 1 再等 0.05s。
     2. 长按左键轮询金 E -> 松开 -> 等 `COMBO_RELEASE_GAP`。
-    3. 趁这个等待读环合值: >= `CYCLE_SWITCH_RATIO`(95%) 切 3 号伊洛伊,
+    3. 趁这个等待读环合值: >= `CYCLE_SWITCH_RATIO`(97%) 切 3 号伊洛伊,
        否则切 2 号达芙蒂尔。
     4. 单击左键完成二连; 切到达芙蒂尔时 0.5s 内再补 5 次左键(伊洛伊不补)。
 
@@ -47,11 +47,11 @@ class ZankouComboHotkeyTask(BaseCombatTask, TriggerTask):
     # 两次 F12 至少隔这么久: 二连(松开+单击)后攻击动作还残留约 1.5s, 期间长按会被动画
     # 吃掉, 而且残留的金 E 会被误当成新的金 E 再打一套。
     COMBO_MIN_INTERVAL = 1.5
-    # 按完切人键到开始长按的等待(用户实测: 0.1s)
-    SWITCH_SETTLE_TIME = 0.1
+    # 按完切人键到开始长按的等待(用户实测: 0.05s)
+    SWITCH_SETTLE_TIME = 0.05
     SWITCH_KEY_DOWN_TIME = 0.05
-    # 二连后按环合值决定切谁: >= 95% 切伊洛伊(满环合, 触发连携登场技), 否则切达芙蒂尔
-    CYCLE_SWITCH_RATIO = 0.95
+    # 二连后按环合值决定切谁: >= 97% 切伊洛伊(满环合, 触发连携登场技), 否则切达芙蒂尔
+    CYCLE_SWITCH_RATIO = 0.97
     # 切到达芙蒂尔后自动补的普攻: 5 次, 在 0.5s 内点完(伊洛伊不补)
     DAFFODILL_PAD_CLICKS = 5
     DAFFODILL_PAD_WINDOW = 0.5

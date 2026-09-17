@@ -78,7 +78,7 @@ class TestZankouComboHotkey(unittest.TestCase):
 
     def test_combo_switches_to_daffodill_when_cycle_low(self):
         task = _make_task()
-        task.cycle_ratio = Mock(return_value=0.5)
+        task.cycle_ratio = Mock(return_value=task.CYCLE_SWITCH_RATIO - 0.01)
 
         task._run_combo()
 
@@ -86,7 +86,7 @@ class TestZankouComboHotkey(unittest.TestCase):
 
     def test_combo_switches_to_iroi_when_cycle_full(self):
         task = _make_task()
-        task.cycle_ratio = Mock(return_value=0.95)
+        task.cycle_ratio = Mock(return_value=task.CYCLE_SWITCH_RATIO)
 
         task._run_combo()
 
