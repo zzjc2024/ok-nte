@@ -111,7 +111,11 @@ def record(args, matcher):
 
     capture = create_capture_source(MODE_PROCESS, process_name=args.process)
     if not capture.start():
-        print(f"[record] process loopback not ready for {args.process}: {capture.error}")
+        print(
+            f"[record] process loopback not ready for {args.process}: {capture.error}\n"
+            "[record] check: is the game running? if the game runs elevated, "
+            "start this script elevated too."
+        )
         return 1
     print(f"[record] capturing {capture.name} -> {args.out} (Ctrl+C to stop)")
     print(f"[record] thresholds: {', '.join(f'{k}={v[1]}' for k, v in SOUND_FILES.items())}")
