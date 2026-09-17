@@ -23,6 +23,8 @@ class TestFourCharCombo(unittest.TestCase):
         task._dodge_heard_at = 0.0
         task._holding = False
         task._dodge_success_heard = threading.Event()
+        task._alert_interrupt = threading.Event()
+        task._last_zankou_combo_at = 0.0
         task.sleep = Mock()
         task.mouse_down = Mock()
         task.mouse_up = Mock()
@@ -34,6 +36,41 @@ class TestFourCharCombo(unittest.TestCase):
         task._raise_combo_anomaly = Mock(side_effect=ZankouComboAnomaly("anomaly"))
         task.chars = [Mock(index=index) for index in range(4)]
         self.task = task
+
+    def test_zankou_combo_skipped_after_sound_path_combo(self):
+        # 声音路径(闪避成功反击)刚打完 -> 主循环不要再打一套(21:14 异常的根因)
+        self.task._zankou_hold_with_recovery = Mock(return_value=HoldResult.GOLD)
+        self.task._last_zankou_combo_at = time.time()
+
+        self.task._zankou_combo()
+
+        self.task._zankou_hold_with_recovery.assert_not_called()
+
+    def test_zankou_combo_runs_when_stamp_is_old(self):
+        self.task._zankou_hold_with_recovery = Mock(return_value=HoldResult.GOLD)
+        self.task._last_zankou_combo_at = time.time() - 10
+
+        self.task._zankou_combo()
+
+        self.task._zankou_hold_with_recovery.assert_called_once()
+
+    def test_sound_success_zankou_combo_stamps_timestamp(self):
+        self.task.get_current_char = Mock(return_value=self.task.zankou)
+        self.task._zankou_combo_interruptible = Mock(return_value=False)
+
+        self.task._sound_dodge_success_action()
+
+        self.assertGreater(self.task._last_zankou_combo_at, 0.0)
+
+    def test_sound_success_on_other_char_does_not_stamp(self):
+        # 非残虹: 设计上就是主循环随后切残虹打二连, 不能把主循环那套跳掉
+        self.task.get_current_char = Mock(return_value="Sakiri")
+        self.task._sound_immediate_reaction = Mock()
+
+        self.task._sound_dodge_success_action()
+
+        self.assertEqual(self.task._last_zankou_combo_at, 0.0)
+        self.task._sound_immediate_reaction.assert_called_once()
 
     def test_hold_returns_dodge_when_dodge_heard_during_hold(self):
         def find_one(*args, **kwargs):

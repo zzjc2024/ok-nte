@@ -100,6 +100,10 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     COMBO_RELEASE_GAP = 0.06
     COMBO_CLICK_GAP = 0.05
     COMBO_DODGE_RETRY_MAX = 3
+    # 声音路径(闪避成功反击)刚打完残虹二连后, 主循环在这段时间内不要再打一套。
+    # 实测撞车间隔 0.07~0.14s; 主循环最多再叠 SWITCH_SETTLE_TIME(0.1s) + 入场技预测(1.1s),
+    # 所以取 2.5s。残虹二连的自然间隔由 E 冷却决定(~10s), 不会被这个窗口误伤。
+    ZANKOU_COMBO_DEDUP_WINDOW = 2.5
     HEALTH_DROP_RATIO = 0.02
     HEALTH_DROP_MIN_PIXELS = 4
     DODGE_RETRY_TIMEOUT = 3.0
@@ -161,6 +165,10 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._precombat_daffodill_q_done = False
         self._sound_counter_pending = False
         self._in_sound_reaction = False
+        # 声音路径(闪避成功反击)最近一次打完残虹二连的时刻: 主循环知道"刚打过, 跳过",
+        # 否则主循环会紧接着再打一套, 二次长按只能看到上一套残留的金 E -> NO_GOLD ->
+        # 走掉血/闪避重试 -> 角色正被连击闪不出来 -> 抛异常停任务(2026-09-16 21:14)。
+        self._last_zankou_combo_at = 0.0
         self._pad_target = None
         self._alert_interrupt = threading.Event()
         self._dodge_motion_heard = threading.Event()
@@ -257,6 +265,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._holding = False
         self._opener_lost_since = 0.0
         self._q_wait_attack_at = 0.0
+        self._last_zankou_combo_at = 0.0
 
     def check_combat(self):
         """紧输入序列(开局)期间抑制战斗检测, 避免大招特写被误判脱战打断."""
@@ -671,12 +680,29 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
 
     def _zankou_combo(self):
         """残虹二连: 长按轮询金E -> 松开 -> 单击左键 (间隔见 COMBO_* 常量)."""
+        if self._zankou_combo_recently_done():
+            logger.info(
+                "zankou combo skipped: sound path already ran it "
+                f"({time.time() - self._last_zankou_combo_at:.2f}s ago)"
+            )
+            return
         self._set_action_phase("zankou_combo")
         if self._zankou_hold_with_recovery() is HoldResult.HANDLED:
             return
         self.sleep(self.COMBO_RELEASE_GAP)
         self.click()
         self.sleep(self.COMBO_CLICK_GAP)
+
+    def _zankou_combo_recently_done(self):
+        """声音路径刚打完一套残虹二连(闪避成功反击) -> 主循环不要再打一遍.
+
+        撞车现象: 主循环二次长按只能看到上一套残留的金 E, 而它落在
+        `COMBO_HOLD_MIN` 之前被有意忽略 -> 报 NO_GOLD -> 走掉血/闪避重试 ->
+        角色正被连击闪不出来 -> 抛异常停任务(2026-09-16 21:14)。
+        只检查时间戳, 不额外看 E 冷却: 时间戳只在"确实点出了那一套"时才写。
+        """
+        elapsed = time.time() - self._last_zankou_combo_at
+        return 0.0 <= elapsed < self.ZANKOU_COMBO_DEDUP_WINDOW
 
     def _zankou_combo_interruptible(self, require_second_gold=False):
         """残虹二连(长按期间可被新攻击警报打断); 返回 True 表示被打断.
@@ -1347,6 +1373,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
                 self.click(down_time=self.SOUND_SUCCESS_CLICK_DOWN)
                 time.sleep(self.DODGE_COUNTER_WAIT)
                 if not self._zankou_combo_interruptible(require_second_gold=True):
+                    # 这一套(含点按左键)确实打出去了 -> 告诉主循环不要再打一遍
+                    self._last_zankou_combo_at = time.time()
                     return
                 logger.info("sound success combo interrupted, dodge then retry")
                 self._set_action_phase("sound_success_interrupt")
