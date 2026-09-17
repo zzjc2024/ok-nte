@@ -25,6 +25,7 @@ class TestFourCharCombo(unittest.TestCase):
         task._dodge_success_heard = threading.Event()
         task._alert_interrupt = threading.Event()
         task._last_zankou_combo_at = 0.0
+        task._last_combo_finished_at = 0.0
         task._last_dodge_was_perfect = False
         task.send_key = Mock()
         task.COMBO_RECOVERY_MAX = 3
@@ -204,6 +205,45 @@ class TestFourCharCombo(unittest.TestCase):
         calls = self.task._hold_until_gold.call_args_list
         self.assertTrue(calls[0].kwargs["require_second_gold"])
         self.assertFalse(calls[1].kwargs["require_second_gold"])
+
+    def test_hold_waits_out_zankou_combo_linger(self):
+        # 残虹二连(松开+单击)后攻击动作残留 1.5s: 期间开始新长按必被动画吃掉, 先补足等待
+        self.task._last_combo_finished_at = time.time() - 0.5
+        self.task.find_one = Mock(return_value=Mock(confidence=0.9))
+
+        result, _damaged = self.task._hold_until_gold()
+
+        self.assertIs(result, HoldResult.GOLD)
+        linger_calls = [
+            call
+            for call in self.task.sleep.call_args_list
+            if call.args and isinstance(call.args[0], float) and 0.9 <= call.args[0] <= 1.1
+        ]
+        self.assertEqual(len(linger_calls), 1)
+
+    def test_hold_skips_linger_when_no_recent_combo(self):
+        # 没有刚完成的二连(比如长按超时后的恢复路径): 不引入额外等待
+        self.task.find_one = Mock(return_value=Mock(confidence=0.9))
+
+        result, _damaged = self.task._hold_until_gold()
+
+        self.assertIs(result, HoldResult.GOLD)
+        self.task.sleep.assert_not_called()
+
+    def test_zankou_combo_stamps_linger_time(self):
+        self.task._zankou_hold_with_recovery = Mock(return_value=HoldResult.GOLD)
+
+        self.task._zankou_combo()
+
+        self.assertGreater(self.task._last_combo_finished_at, 0.0)
+
+    def test_zankou_combo_interrupted_does_not_stamp_linger(self):
+        # 被警报打断的长按没有完成二连: 不允许写残留时间戳, 否则重试节奏被拖慢
+        self.task._zankou_hold_with_recovery = Mock(return_value=HoldResult.INTERRUPTED)
+
+        self.assertTrue(self.task._zankou_combo_interruptible())
+
+        self.assertEqual(self.task._last_combo_finished_at, 0.0)
 
     def test_wait_controllable_needs_raw_cd_to_tick(self):
         # 实测 bug: 大招一按下去 Q 图标就变灭, 但此时还在特写里(in_team=False),

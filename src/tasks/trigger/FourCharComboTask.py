@@ -112,6 +112,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     # 实测撞车间隔 0.07~0.14s; 主循环最多再叠 SWITCH_SETTLE_TIME(0.1s) + 入场技预测(1.1s),
     # 所以取 2.5s。残虹二连的自然间隔由 E 冷却决定(~10s), 不会被这个窗口误伤。
     ZANKOU_COMBO_DEDUP_WINDOW = 2.5
+    # 残虹二连(松开+单击)之后攻击动作仍持续约 1.5s; 期间切回残虹长按会被动画吃掉
+    # (13:07 "切人后 0.13s 长按全落空"同机理)。任何一次新长按开始前必须距上次二连
+    # 完成 >= 该值, 由 `_hold_until_gold` 开头显式补足(`_last_combo_finished_at`),
+    # 不依赖"达芙 Q 施放刚好够长"这类各路径的时序巧合。
+    ZANKOU_COMBO_LINGER_TIME = 1.5
     HEALTH_DROP_RATIO = 0.02
     HEALTH_DROP_MIN_PIXELS = 4
     # 金 E(真金) vs 白/蓄力: 录屏逐帧证据(logs/证据.mp4) —— 金 0.71~0.88, 白/蓄力 0.42~0.61,
@@ -176,6 +181,9 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         # 否则主循环会紧接着再打一套, 二次长按只能看到上一套残留的金 E -> NO_GOLD ->
         # 走掉血/闪避重试 -> 角色正被连击闪不出来 -> 抛异常停任务(2026-09-16 21:14)。
         self._last_zankou_combo_at = 0.0
+        # 最近一次残虹二连(松开+单击)完成的时刻: `_hold_until_gold` 开头用它补足
+        # ZANKOU_COMBO_LINGER_TIME(1.5s)的攻击动作残留期, 期间开始新长按必被吃掉。
+        self._last_combo_finished_at = 0.0
         self._alert_interrupt = threading.Event()
         self._dodge_success_heard = threading.Event()
         # 最近一次听到闪避(动作音/成功音)的时刻, 声音线程写, 主线程读:
@@ -272,6 +280,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._opener_lost_since = 0.0
         self._q_wait_attack_at = 0.0
         self._last_zankou_combo_at = 0.0
+        self._last_combo_finished_at = 0.0
 
     def check_combat(self):
         """紧输入序列(开局)期间抑制战斗检测, 避免大招特写被误判脱战打断."""
@@ -688,6 +697,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self.sleep(self.COMBO_RELEASE_GAP)
         self.click()
         self.sleep(self.COMBO_CLICK_GAP)
+        self._last_combo_finished_at = time.time()
 
     def _zankou_combo_recently_done(self):
         """声音路径刚打完一套残虹二连(闪避成功反击) -> 主循环不要再打一遍.
@@ -716,6 +726,7 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self.sleep(self.COMBO_RELEASE_GAP)
         self.click()
         self.sleep(self.COMBO_CLICK_GAP)
+        self._last_combo_finished_at = time.time()
         return False
 
     def _zankou_hold_with_recovery(self, interrupt_event=None, require_second_gold=False):
@@ -897,6 +908,14 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         damaged = False
         health_peak = None
         health_samples = 0
+        # 残虹二连残留期(ZANKOU_COMBO_LINGER_TIME)内不允许开始新长按, 先显式补足,
+        # 不依赖各路径(切人/达芙 Q 施放等)刚好消耗掉这 1.5s。
+        linger_wait = self.ZANKOU_COMBO_LINGER_TIME - (
+            time.time() - self._last_combo_finished_at
+        )
+        if linger_wait > 0:
+            logger.info(f"zankou wait combo linger {linger_wait:.2f}s before hold")
+            self.sleep(linger_wait)
         wait = self._entry_skill_until - time.time()
         if wait > 0:
             logger.info(f"zankou wait entry skill {wait:.2f}s before combo")

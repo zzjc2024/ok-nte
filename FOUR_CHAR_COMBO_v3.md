@@ -121,6 +121,7 @@ White → Green → Red → Purple → Blue → Yellow → White
 | 超时次数超预算 | 超时 > `COMBO_RECOVERY_MAX=3` | 真状态异常 → 落盘现场（整帧 + 技能条截图）→ `disable()` 停任务 → 抛 `ZankouComboAnomaly` |
 
 - 血条仍**连续采样**（`_health_pixels()` = 当前角色血条红条掩码非零像素数，判据 `下降 > max(4px, peak*2%)`），但**只用于日志定位**，不再改变恢复路径；恢复后按"等第一次金 E"重打（闪避攻击/蓄力上下文已不在）。
+- **残虹二连残留 1.5s 是硬约束（2026-09-17 显式化）**：二连（松开+单击）后攻击动作仍持续约 1.5s，期间切回残虹长按必被动画吃掉（13:07 同机理）。`_zankou_combo`/`_zankou_combo_interruptible` **完成**单击时写 `_last_combo_finished_at`（被打断/超时/去重跳过都不写），`_hold_until_gold` 开头不足 `ZANKOU_COMBO_LINGER_TIME=1.5s` 就先补足等待再长按。正常路径实测间隔 2.5~7s，此等待为 0；它只兜"达芙 Q 施放变快/某条路径压缩时序"这类未来的坑。达芙 Q 时停分支（先吃二连→切回达芙放 Q→切回）实测 4~7s，天然满足。
 - **闪避触发不算异常的原因**：闪避动画期间普攻不生效、金 E 不会出现，而成功闪避又不掉血，正好落进旧版"没掉血也没金 E"的异常判据里（旧版本这里会误抛异常停任务）。
 - 长按期间的成功闪避**由长按自己收尾**：`_sound_dodge_success_action` 发现 `_holding` 为真时直接返回（只置标志），不点左键、不重打二连，避免和长按抢鼠标；长按侧中断后走上面的"点左键 → 等反击动画 → 重打"。
 
@@ -249,7 +250,7 @@ White → Green → Red → Purple → Blue → Yellow → White
 
 1. 先读本文再动代码；只改本任务相关文件，不顺手重构。
 2. 保持"只通过 UI / 系统输出交互"的边界（截图、OCR、模板、声音、窗口 API、普通键鼠）。
-3. 长按 ≤0.9s、**不许重按**；长按起点必须由 §4.2 双 Q recovery 或 §4.4 入场技预测保证。
+3. 长按 ≤0.9s、**不许重按**；长按起点必须由 §4.2 双 Q recovery 或 §4.4 入场技预测保证，且距上次二连完成 ≥ `ZANKOU_COMBO_LINGER_TIME`(1.5s, `_hold_until_gold` 开头显式补足)。
 4. 冷却判断用**原始 OCR 数字**，不用 `get_cd()`。
 5. 敌人是否还在用 `_enemy_present()`，不用 `in_combat()`。
 6. 不采信框架的 `active health change` 切人判定。
