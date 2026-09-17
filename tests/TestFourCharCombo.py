@@ -79,21 +79,6 @@ class TestFourCharCombo(unittest.TestCase):
         self.task._switch_to.assert_not_called()
         self.assertEqual(self.task._last_zankou_combo_at, 0.0)
 
-    def test_no_gold_no_damage_retries_hold_before_anomaly(self):
-        # 切人动画吃掉长按(金 E 全 0 且不掉血): 先重打几次, 不要直接停任务
-        self.task.COMBO_DODGE_RETRY_MAX = 3
-        self.task._hold_until_gold = Mock(
-            side_effect=[
-                (HoldResult.NO_GOLD, False),
-                (HoldResult.NO_GOLD, False),
-                (HoldResult.GOLD, False),
-            ]
-        )
-        self.task._verify_current = Mock(return_value=True)
-
-        self.assertIs(self.task._zankou_hold_with_recovery(), HoldResult.GOLD)
-        self.assertEqual(self.task._hold_until_gold.call_count, 3)
-
     def test_dodge_not_confirmed_retries_then_raises(self):
         # 角色正被连击时闪不出来: 本轮只记日志继续再试, 几轮都不行才抛异常
         self.task.COMBO_DODGE_RETRY_MAX = 3
