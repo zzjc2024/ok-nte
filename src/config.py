@@ -223,6 +223,7 @@ config = {
     "trigger_tasks": [  # 不断执行的触发式任务
         ["src.tasks.trigger.AutoCombatTask", "AutoCombatTask"],
         ["src.tasks.trigger.FourCharComboTask", "FourCharComboTask"],
+        ["src.tasks.trigger.ZankouComboHotkeyTask", "ZankouComboHotkeyTask"],
         ["src.tasks.trigger.SoundTriggerTask", "SoundTriggerTask"],
         ["src.tasks.trigger.SkipDialogTask", "SkipDialogTask"],
         ["src.tasks.trigger.FastTravelTask", "FastTravelTask"],
