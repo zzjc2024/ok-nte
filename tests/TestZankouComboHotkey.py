@@ -25,14 +25,17 @@ def _make_task(mock_hold=True):
     task.log_warning = Mock()
     task.log_error = Mock()
     task._current_index = Mock(return_value=1)
-    task._switch_to_index = Mock(return_value=True)
     if mock_hold:
         task._hold_until_gold = Mock(return_value=True)
     return task
 
 
+def _switch_keys(task):
+    return [call.args[0] for call in task.send_key.call_args_list]
+
+
 class TestZankouComboHotkey(unittest.TestCase):
-    """F12 手动辅助: 切残虹 -> 二连 -> 切回原角色, 失败只记日志."""
+    """F12 手动辅助: 切残虹(不等确认) -> 二连 -> 切回原角色 + 补 5 次普攻."""
 
     def test_combo_switches_to_zankou_then_back(self):
         task = _make_task()
@@ -40,20 +43,40 @@ class TestZankouComboHotkey(unittest.TestCase):
 
         task._run_combo()
 
-        self.assertEqual(
-            [call.args[0] for call in task._switch_to_index.call_args_list], [0, 1]
-        )
-        task.click.assert_called_once()
+        # 1 号位(残虹) -> 2 号位(原角色)
+        self.assertEqual(_switch_keys(task), [1, 2])
+        # 二连的单击 + 切回后的 5 次普攻
+        self.assertEqual(task.click.call_count, 1 + task.SWITCH_BACK_CLICKS)
         self.assertGreater(task._last_combo_at, 0.0)
 
-    def test_combo_on_zankou_does_not_switch(self):
+    def test_combo_on_zankou_does_not_switch_or_pad(self):
+        # 已经在残虹身上: 不切人, 也不补那 5 次普攻
         task = _make_task()
         task._current_index = Mock(return_value=0)
 
         task._run_combo()
 
-        task._switch_to_index.assert_not_called()
+        task.send_key.assert_not_called()
         task.click.assert_called_once()
+
+    def test_combo_does_not_wait_for_switch_confirmation(self):
+        task = _make_task()
+        task._current_index = Mock(return_value=3)
+
+        task._run_combo()
+
+        # 按完切人键只等 SWITCH_SETTLE_TIME 就长按, 不做图像确认
+        task._hold_until_gold.assert_called_once_with(extra=task.ENTRY_SKILL_EXTRA)
+        self.assertEqual(task.sleep.call_args_list[0].args[0], task.SWITCH_SETTLE_TIME)
+
+    def test_switch_back_clicks_are_spread_over_the_window(self):
+        task = _make_task()
+        task._current_index = Mock(return_value=1)
+
+        task._run_combo()
+
+        gaps = [call.args[0] for call in task.sleep.call_args_list]
+        self.assertIn(task.SWITCH_BACK_CLICK_WINDOW / task.SWITCH_BACK_CLICKS, gaps)
 
     def test_combo_skipped_when_previous_combo_too_recent(self):
         task = _make_task()
@@ -61,7 +84,7 @@ class TestZankouComboHotkey(unittest.TestCase):
 
         task._run_combo()
 
-        task._switch_to_index.assert_not_called()
+        task.send_key.assert_not_called()
         task._hold_until_gold.assert_not_called()
         task.click.assert_not_called()
 
@@ -71,17 +94,8 @@ class TestZankouComboHotkey(unittest.TestCase):
 
         task._run_combo()
 
-        task._switch_to_index.assert_not_called()
+        task.send_key.assert_not_called()
         task._hold_until_gold.assert_not_called()
-
-    def test_combo_aborts_when_switch_not_confirmed(self):
-        task = _make_task()
-        task._switch_to_index = Mock(return_value=False)
-
-        task._run_combo()
-
-        task._hold_until_gold.assert_not_called()
-        task.click.assert_not_called()
 
     def test_combo_does_not_click_when_gold_never_shows(self):
         task = _make_task()
@@ -91,14 +105,6 @@ class TestZankouComboHotkey(unittest.TestCase):
 
         task.click.assert_not_called()
         self.assertEqual(task._last_combo_at, 0.0)
-
-    def test_combo_passes_entry_skill_extra_only_when_switching(self):
-        task = _make_task()
-        task._current_index = Mock(return_value=2)
-
-        task._run_combo()
-
-        task._hold_until_gold.assert_called_once_with(extra=task.ENTRY_SKILL_EXTRA)
 
     def test_run_ignores_request_outside_team(self):
         task = _make_task()

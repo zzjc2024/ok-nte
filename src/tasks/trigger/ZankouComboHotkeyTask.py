@@ -12,10 +12,14 @@ logger = Logger.get_logger(__name__)
 class ZankouComboHotkeyTask(BaseCombatTask, TriggerTask):
     """按 F12 打一次残虹二连 (手动辅助, 不跑自动循环).
 
-    序列: 切残虹(需要时) -> 长按左键等金 E -> 松开 -> 单击左键 -> 切回按下 F12 时的角色。
+    序列: 切残虹(需要时) -> 长按左键等金 E -> 松开 -> 单击左键 -> 切回按下 F12 时的角色,
+    切回后在 0.5s 内自动点 5 次左键。
 
-    任何一步失败(认不出当前角色 / 切人没确认 / 长按没出金 E)都只记日志直接结束:
-    不做恢复、不抛异常停任务, 玩家再按一次 F12 即可。
+    切人**不做图像确认**: 按完数字键等 0.1s 就直接长按(用户要求, 快优先)。
+    任何一步失败(认不出当前角色 / 长按没出金 E)都只记日志直接结束: 不做恢复、
+    不抛异常停任务, 玩家再按一次 F12 即可。
+
+    已经在残虹身上时不切人、二连后也不点那 5 次(没有要切回的角色)。
 
     约定: 固定 4 人队(1 号位 = 残虹), 与四人连招任务一致。不要和 `AutoCombatTask`
     或四人连招任务同时开; app 全局 Start/Stop 热键也不要设成 F12。
@@ -34,17 +38,17 @@ class ZankouComboHotkeyTask(BaseCombatTask, TriggerTask):
     GOLD_THRESHOLD = 0.65
     # 切到残虹时按住左键穿过她的入场技(满环合的相邻角色切过来会触发, 期间按键不生效
     # 但按住状态保留), 控制一恢复蓄力立刻开始; 上限按入场技实测时长(1.1s)延长。
+    # 注意: 只延长上限, 开始长按的时机仍是"按完切人键 + SWITCH_SETTLE_TIME"。
     ENTRY_SKILL_EXTRA = 1.2
     # 两次 F12 至少隔这么久: 二连(松开+单击)后攻击动作还残留约 1.5s, 期间长按会被动画
     # 吃掉, 而且残留的金 E 会被误当成新的金 E 再打一套。
     COMBO_MIN_INTERVAL = 1.5
+    # 按完切人键到开始长按的等待(用户实测: 0.1s)
     SWITCH_SETTLE_TIME = 0.1
-    SWITCH_CONFIRM_TIMEOUT = 3.0
-    # 切人确认要求目标高亮连续稳定这么久(过滤切换动画里的瞬态高亮)
-    SWITCH_CONFIRM_STABLE = 0.15
-    SWITCH_KEY_INTERVAL = 0.2
     SWITCH_KEY_DOWN_TIME = 0.05
-    SCRIPT_TICK = 0.05
+    # 切回原角色后自动补的普攻: 5 次, 在 0.5s 内点完
+    SWITCH_BACK_CLICKS = 5
+    SWITCH_BACK_CLICK_WINDOW = 0.5
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -147,19 +151,17 @@ class ZankouComboHotkeyTask(BaseCombatTask, TriggerTask):
         now = time.time()
         elapsed = now - self._last_combo_at
         if elapsed < self.COMBO_MIN_INTERVAL:
-            self.log_info(
-                f"残虹二连: 距上次二连只有 {elapsed:.2f}s, 忽略这次 F12"
-            )
+            self.log_info(f"残虹二连: 距上次二连只有 {elapsed:.2f}s, 忽略这次 F12")
             return
         current = self._current_index()
         if current < 0:
             self.log_warning("残虹二连: 认不出当前角色, 结束")
             return
         switched = current != self.ZANKOU_INDEX
-        if switched and not self._switch_to_index(self.ZANKOU_INDEX):
-            self.log_warning("残虹二连: 切残虹没确认, 结束")
-            return
-        self.sleep(self.SWITCH_SETTLE_TIME)
+        if switched:
+            # 不等切人确认: 按完 1 号位等 SWITCH_SETTLE_TIME 就直接长按(用户要求)
+            self._press_switch_key(self.ZANKOU_INDEX)
+            self.sleep(self.SWITCH_SETTLE_TIME)
         if not self._hold_until_gold(extra=self.ENTRY_SKILL_EXTRA if switched else 0.0):
             return
         self.sleep(self.COMBO_RELEASE_GAP)
@@ -167,8 +169,24 @@ class ZankouComboHotkeyTask(BaseCombatTask, TriggerTask):
         self.sleep(self.COMBO_CLICK_GAP)
         self._last_combo_at = time.time()
         self.log_info("残虹二连: 已打出")
-        if switched and not self._switch_to_index(current):
-            self.log_warning(f"残虹二连: 切回 {current + 1} 号位没确认")
+        if switched:
+            self._switch_back(current)
+
+    def _switch_back(self, index):
+        """切回原角色, 然后在 SWITCH_BACK_CLICK_WINDOW 内自动补 SWITCH_BACK_CLICKS 次左键.
+
+        同样不等切人确认(和切残虹一致); 切人还没生效时这几次普攻落在残虹身上,
+        无害(她本来也要打完二连的残留动作)。
+        """
+        self._press_switch_key(index)
+        gap = self.SWITCH_BACK_CLICK_WINDOW / self.SWITCH_BACK_CLICKS
+        for _ in range(self.SWITCH_BACK_CLICKS):
+            self.sleep(gap)
+            self.click()
+        self.log_info(f"残虹二连: 已切回 {index + 1} 号位并补 {self.SWITCH_BACK_CLICKS} 次普攻")
+
+    def _press_switch_key(self, index):
+        self.send_key(index + 1, down_time=self.SWITCH_KEY_DOWN_TIME)
 
     # -------------------------------------------------------------- helpers
 
@@ -181,43 +199,6 @@ class ZankouComboHotkeyTask(BaseCombatTask, TriggerTask):
             logger.info(f"zankou combo hotkey: current char rejected ({detection.reason})")
             return -1
         return detection.index
-
-    def _switch_to_index(self, index):
-        """按数字键切到 index 号位, 用头像高亮确认(不采信框架的 active health change).
-
-        返回 False = 超时没确认(被控 / 切人 CD / 检测失明), 调用方只记日志。
-        """
-        key = index + 1
-        deadline = time.time() + self.SWITCH_CONFIRM_TIMEOUT
-        stable_since = 0.0
-        detection = None
-        with self.skip_sleep_checks() as skip:
-            skip.check_combat = True
-            while time.time() < deadline:
-                detection = self._get_current_char_detection(
-                    frame=self.frame, char_count=self.TEAM_SIZE
-                )
-                if detection.accepted and detection.index == index:
-                    if stable_since == 0.0:
-                        stable_since = time.time()
-                    if time.time() - stable_since >= self.SWITCH_CONFIRM_STABLE:
-                        logger.info(f"zankou combo switch confirmed -> slot {key}")
-                        return True
-                else:
-                    stable_since = 0.0
-                self.send_key(
-                    key,
-                    action_name="zankou_hotkey_switch",
-                    interval=self.SWITCH_KEY_INTERVAL,
-                    down_time=self.SWITCH_KEY_DOWN_TIME,
-                )
-                self.sleep(self.SCRIPT_TICK)
-        logger.warning(
-            f"zankou combo switch to slot {key} not confirmed, "
-            f"got {detection.index if detection else None} "
-            f"(reason={detection.reason if detection else None})"
-        )
-        return False
 
     def _hold_until_gold(self, extra=0.0):
         """长按左键轮询金 E; 出现返回 True(调用方负责松开后的点按), 超时返回 False.

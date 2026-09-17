@@ -291,12 +291,13 @@ White → Green → Red → Purple → Blue → Yellow → White
 用户决定暂缓整套自动四人连招，先要一个**手动游玩时按一下 F12 打一次残虹二连**的简单功能。
 
 - 实现：`src/tasks/trigger/ZankouComboHotkeyTask.py`（继承 `BaseCombatTask, TriggerTask`）；注册在 `src/config.py` 的 `trigger_tasks`；任务名 `残虹二连(F12)`；默认关；`trigger_interval=0.1`。
-- 序列（`_run_combo`）：认当前角色（图像检测）→ 需要时按数字键切残虹（`_switch_to_index`，高亮连续稳定 `SWITCH_CONFIRM_STABLE=0.15s` 才算确认）→ 停 `SWITCH_SETTLE_TIME` → 长按左键轮询金 E（`_hold_until_gold`，下限 `COMBO_HOLD_MIN=0.67s` 忽略残留金 E，上限 `COMBO_HOLD_MAX=0.9s`）→ 松开 `0.06s` → 单击 → `0.05s` → 切回按下 F12 时的角色。
-- **任何一步失败只记日志直接结束**（认不出当前角色 / 切人没确认 / 没出金 E）：不做恢复、不切达芙蒂尔、不抛异常停任务 —— 玩家再按一次即可（用户明确要求）。
+- 序列（`_run_combo`）：认当前角色（图像检测）→ 需要时按数字键切残虹（**不做图像确认**，按完等 `SWITCH_SETTLE_TIME=0.1s` 直接长按，用户要求"快优先"）→ 长按左键轮询金 E（`_hold_until_gold`，下限 `COMBO_HOLD_MIN=0.67s` 忽略残留金 E，上限 `COMBO_HOLD_MAX=0.9s`）→ 松开 `0.06s` → 单击 → `0.05s` → 切回按下 F12 时的角色（同样不等确认）→ **0.5s 内自动补 5 次左键**（`SWITCH_BACK_CLICKS=5` / `SWITCH_BACK_CLICK_WINDOW=0.5s`，每 0.1s 一次）。
+- **已经在残虹身上时不切人、二连后也不补那 5 次普攻**（没有要切回的角色，用户明确要求）。
+- **任何一步失败只记日志直接结束**（认不出当前角色 / 没出金 E）：不做恢复、不切达芙蒂尔、不抛异常停任务 —— 玩家再按一次即可（用户明确要求）。
 - 热键：pynput 全局监听 F12（`on_release`，避免长按自动重复）。`enable()` 和 `run()` 都会幂等注册（加锁），`disable()` / `on_destroy()` 注销；app 全局 Start/Stop 热键若也是 F12 会 `log_warning` 提醒一次。
-- 复用四人连招任务的实测参数：`GOLD_THRESHOLD=0.65`、`COMBO_HOLD_MIN/MAX`、`SWITCH_CONFIRM_STABLE`。
-- 与四人连招任务的差别（刻意简化）：不跑自动循环、不接声音、没有闪避/恢复状态机、没有落盘日志（走 `logs/ok-script.log` 和 UI Log）。
-- 入场技：切到残虹时**按住左键穿过入场技**（按键不生效但按住状态保留），长按上限额外加 `ENTRY_SKILL_EXTRA=1.2s`；已经在残虹身上时不加。
+- 复用四人连招任务的实测参数：`GOLD_THRESHOLD=0.65`、`COMBO_HOLD_MIN/MAX`。
+- 与四人连招任务的差别（刻意简化）：不跑自动循环、不接声音、没有闪避/恢复状态机、切人不做确认、没有落盘日志（走 `logs/ok-script.log` 和 UI Log）。
+- 入场技：切到残虹时**按住左键穿过入场技**（按键不生效但按住状态保留），长按上限额外加 `ENTRY_SKILL_EXTRA=1.2s`；已经在残虹身上时不加。注意这只延长上限，不影响"按完切人键 +0.1s 就开始长按"。
 - 防双打：距上次二连（松开+单击）不足 `COMBO_MIN_INTERVAL=1.5s` 的 F12 直接忽略（二连后攻击动作残留约 1.5s，且残留金 E 会被误当新金 E）。
-- 单测：`tests/TestZankouComboHotkey.py`（切残虹→二连→切回顺序、间隔忽略、认不出角色/切人失败不点按、金 E 下限/超时、异常也松开鼠标）。
-- **未验证（真机没跑过）**：F12 响应延迟（executor 轮询 0.1s）、切人确认、穿入场技长按、2.1s 上限是否够。
+- 单测：`tests/TestZankouComboHotkey.py`（切残虹→二连→切回+补 5 次的顺序与次数、在残虹身上不切不补、按完切人键只等 0.1s、间隔忽略、认不出角色不动作、金 E 下限/超时、异常也松开鼠标）。
+- **未验证（真机没跑过）**：F12 响应延迟（executor 轮询 0.1s）、切人不确认是否够快（0.1s）、穿入场技长按、2.1s 上限是否够、切回后那 5 次普攻的节奏。
