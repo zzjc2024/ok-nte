@@ -5,7 +5,6 @@ from unittest.mock import Mock, patch
 
 from src.combat.BaseCombatTask import SleepCheckSkip
 from src.tasks.trigger.FourCharComboTask import (
-    DodgeRetry,
     FourCharComboTask,
     HoldResult,
     ZankouComboAnomaly,
@@ -24,12 +23,12 @@ class TestFourCharCombo(unittest.TestCase):
         task._dodge_heard_at = 0.0
         task._holding = False
         task._dodge_success_heard = threading.Event()
-        task._dodge_motion_heard = threading.Event()
         task._alert_interrupt = threading.Event()
         task._last_zankou_combo_at = 0.0
         task._last_dodge_was_perfect = False
         task.send_key = Mock()
-        task.COMBO_DODGE_RETRY_MAX = 3
+        task.COMBO_RECOVERY_MAX = 3
+        task.COMBO_RECOVER_SWITCH_RETRIES = 3
         task.sleep = Mock()
         task.mouse_down = Mock()
         task.mouse_up = Mock()
@@ -79,30 +78,29 @@ class TestFourCharCombo(unittest.TestCase):
         self.task._switch_to.assert_not_called()
         self.assertEqual(self.task._last_zankou_combo_at, 0.0)
 
-    def test_dodge_not_confirmed_retries_then_raises(self):
-        # 角色正被连击时闪不出来: 本轮只记日志继续再试, 几轮都不行才抛异常
-        self.task.COMBO_DODGE_RETRY_MAX = 3
+    def test_no_gold_timeouts_recover_then_raise_after_max(self):
+        # 长按超时(掉不掉血都一样) -> 切达芙蒂尔上场打一轮再回来; 超过预算才抛异常
         self.task._hold_until_gold = Mock(return_value=(HoldResult.NO_GOLD, True))
-        self.task._dodge_until_triggered = Mock(return_value=DodgeRetry.NOT_TRIGGERED)
+        self.task._recover_on_daffodill = Mock(return_value=True)
 
         with self.assertRaises(ZankouComboAnomaly):
             self.task._zankou_hold_with_recovery()
 
-        self.assertEqual(self.task._dodge_until_triggered.call_count, 3)
+        self.assertEqual(self.task._recover_on_daffodill.call_count, 3)
 
-    def test_dodge_triggered_after_damage_returns_gold(self):
+    def test_no_gold_after_damage_recovers_then_gold(self):
+        # 掉血不再触发普通闪避, 也不再立即异常: 走达芙蒂尔恢复后重打成功
         self.task._hold_until_gold = Mock(
             side_effect=[(HoldResult.NO_GOLD, True), (HoldResult.GOLD, False)]
         )
-        self.task._dodge_until_triggered = Mock(return_value=DodgeRetry.TRIGGERED)
+        self.task._recover_on_daffodill = Mock(return_value=True)
 
         self.assertIs(self.task._zankou_hold_with_recovery(), HoldResult.GOLD)
-        self.assertEqual(self.task._dodge_until_triggered.call_count, 1)
+        self.task._recover_on_daffodill.assert_called_once()
 
     def test_hold_marks_normal_dodge_not_perfect(self):
         def find_one(*args, **kwargs):
             self.task._dodge_heard_at = time.time() + 1
-            self.task._dodge_motion_heard.set()
             return None
 
         self.task.find_one = Mock(side_effect=find_one)
@@ -124,7 +122,7 @@ class TestFourCharCombo(unittest.TestCase):
         self.assertTrue(self.task._last_dodge_was_perfect)
 
     def test_dodge_retry_waits_for_first_gold_after_normal_dodge(self):
-        self.task.COMBO_DODGE_RETRY_MAX = 2
+        self.task.COMBO_RECOVERY_MAX = 2
         self.task._hold_until_gold = Mock(
             side_effect=[(HoldResult.DODGE, False), (HoldResult.GOLD, False)]
         )
@@ -139,7 +137,7 @@ class TestFourCharCombo(unittest.TestCase):
         self.assertFalse(calls[1].kwargs["require_second_gold"])
 
     def test_dodge_retry_waits_for_second_gold_after_perfect_dodge(self):
-        self.task.COMBO_DODGE_RETRY_MAX = 2
+        self.task.COMBO_RECOVERY_MAX = 2
         self.task._hold_until_gold = Mock(
             side_effect=[(HoldResult.DODGE, False), (HoldResult.GOLD, False)]
         )
@@ -181,14 +179,31 @@ class TestFourCharCombo(unittest.TestCase):
         self.task._recover_from_dodge.assert_called_once_with()
         self.task._raise_combo_anomaly.assert_not_called()
 
-    def test_no_gold_and_no_damage_still_raises_anomaly(self):
+    def test_no_gold_raises_only_after_recovery_budget_exhausted(self):
+        # "没掉血 + 没金 E"不再立即异常: 先走达芙蒂尔恢复, 预算耗尽才停任务
+        self.task.COMBO_RECOVERY_MAX = 1
         self.task._hold_until_gold = Mock(return_value=(HoldResult.NO_GOLD, False))
-        self.task._verify_current = Mock(return_value=True)
+        self.task._recover_on_daffodill = Mock(return_value=True)
 
         with self.assertRaises(ZankouComboAnomaly):
             self.task._zankou_hold_with_recovery()
 
-        self.task._raise_combo_anomaly.assert_called_once()
+        self.task._recover_on_daffodill.assert_called_once()
+
+    def test_recovery_resets_second_gold_context(self):
+        # 切走又切回来, 闪避攻击/蓄力上下文已不在: 恢复后的长按回到等第一次金 E
+        self.task._hold_until_gold = Mock(
+            side_effect=[(HoldResult.NO_GOLD, False), (HoldResult.GOLD, False)]
+        )
+        self.task._recover_on_daffodill = Mock(return_value=True)
+
+        self.assertIs(
+            self.task._zankou_hold_with_recovery(require_second_gold=True), HoldResult.GOLD
+        )
+
+        calls = self.task._hold_until_gold.call_args_list
+        self.assertTrue(calls[0].kwargs["require_second_gold"])
+        self.assertFalse(calls[1].kwargs["require_second_gold"])
 
     def test_wait_controllable_needs_raw_cd_to_tick(self):
         # 实测 bug: 大招一按下去 Q 图标就变灭, 但此时还在特写里(in_team=False),
@@ -228,20 +243,27 @@ class TestFourCharCombo(unittest.TestCase):
         char.send_skill_key.assert_not_called()
         self.task._wait_in_team.assert_called_once()
 
-    def test_no_gold_but_wrong_char_reswitches_instead_of_anomaly(self):
-        # 实测 bug: 切人高亮误报 confirmed, 场上其实还是早雾 -> 不该抛异常停任务
-        self.task._hold_until_gold = Mock(
-            side_effect=[(HoldResult.NO_GOLD, False), (HoldResult.GOLD, False)]
-        )
-        self.task._verify_current = Mock(side_effect=[False, True])
+    def test_recovery_switch_retried_when_not_confirmed(self):
+        # 贴人确认不了 = 角色被控/切人 CD 没好: 整体重试, 成功后照常上场打一轮再切回
         self.task._switch_to = Mock()
-        self.task.get_current_char = Mock(return_value="Sakiri")
+        self.task._verify_current = Mock(side_effect=[False, False, True, True])
+        self.task._daffodill_window = Mock()
+        self.task.sleep = Mock()
 
-        result = self.task._zankou_hold_with_recovery()
+        self.assertTrue(self.task._recover_on_daffodill())
 
-        self.assertIs(result, HoldResult.GOLD)
-        self.task._switch_to.assert_called_once()
-        self.task._raise_combo_anomaly.assert_not_called()
+        self.assertEqual(self.task._switch_to.call_count, 4)  # 达芙3次(2次重试) + 切回残虹
+        self.task._daffodill_window.assert_called_once()
+
+    def test_recovery_gives_up_when_switch_never_confirmed(self):
+        self.task._switch_to = Mock()
+        self.task._verify_current = Mock(return_value=False)
+        self.task._daffodill_window = Mock()
+        self.task.sleep = Mock()
+
+        self.assertFalse(self.task._recover_on_daffodill())
+
+        self.task._daffodill_window.assert_not_called()  # 人不在达芙身上, 不能盲打
 
     def test_dodge_success_reaction_defers_to_active_hold(self):
         self.task._holding = True

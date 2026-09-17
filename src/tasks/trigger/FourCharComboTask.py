@@ -15,7 +15,6 @@ from src.char.Sakiri import Sakiri
 from src.char.Zankou import Zankou
 from src.combat.BaseCombatTask import BaseCombatTask, NotInCombatException, cd_regex
 from src.Labels import Labels
-from src.sound_trigger.SoundCombatContext import SoundCombatContext
 from src.utils import game_filters as gf
 
 logger = Logger.get_logger(__name__)
@@ -37,12 +36,6 @@ class HoldResult(Enum):
     HANDLED = "handled"  # 成功闪避的反击路径已经自己打完二连, 上层不要再补
 
 
-class DodgeRetry(Enum):
-    """`_dodge_until_triggered` 的结局."""
-
-    TRIGGERED = "triggered"  # 普通闪避真的出来了(动作音), 上层重打长按
-    SUCCESS_REACTION = "success_reaction"  # 触发的是完美闪避, 现成的成功反击路径已接管
-    NOT_TRIGGERED = "not_triggered"  # 限时内没听到任何闪避音(可能正被连击), 上层再试几次
 
 _COMBO_LOG_KEYWORDS = (
     "FourCharComboTask",
@@ -107,15 +100,17 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
     COMBO_POLL_INTERVAL = 0.05
     COMBO_RELEASE_GAP = 0.06
     COMBO_CLICK_GAP = 0.05
-    COMBO_DODGE_RETRY_MAX = 3
+    # 长按超时(0.9s 无金 E)后走"切达芙蒂尔上场打一轮再切回"的恢复; 超过这个次数的
+    # 超时仍无金 E 才算真状态异常停任务(保留 13:07 抓"环合检测坏了"那类真问题的兜底)。
+    COMBO_RECOVERY_MAX = 3
+    # 恢复时贴人(切达芙蒂尔/切回残虹)确认不了 = 角色被控或切人 CD 没好, 整体重试几次。
+    COMBO_RECOVER_SWITCH_RETRIES = 3
     # 声音路径(闪避成功反击)刚打完残虹二连后, 主循环在这段时间内不要再打一套。
     # 实测撞车间隔 0.07~0.14s; 主循环最多再叠 SWITCH_SETTLE_TIME(0.1s) + 入场技预测(1.1s),
     # 所以取 2.5s。残虹二连的自然间隔由 E 冷却决定(~10s), 不会被这个窗口误伤。
     ZANKOU_COMBO_DEDUP_WINDOW = 2.5
     HEALTH_DROP_RATIO = 0.02
     HEALTH_DROP_MIN_PIXELS = 4
-    DODGE_RETRY_TIMEOUT = 3.0
-    DODGE_RETRY_INTERVAL = 0.15
     # 金 E(真金) vs 白/蓄力: 录屏逐帧证据(logs/证据.mp4) —— 金 0.71~0.88, 白/蓄力 0.42~0.61,
     # 紫 <=0.41, 无图标 <=0.29。0.65 能干净区分"金"和"白"; 0.45 会把白/蓄力也算成金(已踩过)。
     GOLD_THRESHOLD = 0.65
@@ -179,7 +174,6 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         # 走掉血/闪避重试 -> 角色正被连击闪不出来 -> 抛异常停任务(2026-09-16 21:14)。
         self._last_zankou_combo_at = 0.0
         self._alert_interrupt = threading.Event()
-        self._dodge_motion_heard = threading.Event()
         self._dodge_success_heard = threading.Event()
         # 最近一次听到闪避(动作音/成功音)的时刻, 声音线程写, 主线程读:
         # 长按期间它变大 = 这次长按被闪避打断了, 不能按"没掉血"抛异常。
@@ -269,7 +263,6 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._action_phase = ""
         self._suppress_combat_check = False
         self._alert_interrupt.clear()
-        self._dodge_motion_heard.clear()
         self._dodge_success_heard.clear()
         self._dodge_heard_at = 0.0
         self._holding = False
@@ -723,67 +716,80 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         return False
 
     def _zankou_hold_with_recovery(self, interrupt_event=None, require_second_gold=False):
-        """长按轮询金 E; 没出金 E 时按"是否掉血"分流, 返回最终结果.
+        """长按轮询金 E; 一次超时就切达芙蒂尔上场打一轮, 再切回来重打.
 
-        **不重按**: 长按起点由 `_switch_to` 的入场技预测 (`_entry_skill_until`) 保证;
-        重按会白等 1~2s, 限时关卡里等于直接失败。
-
-        - 掉血 = 大概率被打断 -> 连按 shift 直到闪避真的触发, 然后重打长按;
-        - 长按期间闪避触发 = 普攻被闪避动画打断, **不是异常** ->
-          点左键触发闪避反击 -> 等反击动画 -> 重打长按(此时等第二次金 E);
-        - 没掉血也没闪避 = 状态异常 -> 抛异常停任务。
+        **不重按**(长按起点由 `_switch_to` 的入场技预测保证), 也**不再用"普通闪避重试"**
+        (连按 shift + 动作音确认): 它的收益只是确认角色能动, 负担却是整套闪避状态机
+        (2026-09-17 16:46 实机撞车: 成功反击在 `_dodge_until_triggered` 的 sleep 里重入
+        执行 6s, 吃光 3s 重试窗口 -> 误报"闪避没确认"异常停任务)。现在:
+        - 掉血与否都**不打断长按**, 血条只采样记日志;
+        - 长按期间闪避触发 = 普攻被闪避动画打断, 不是异常: 点左键触发闪避反击 ->
+          等反击动画 -> 重打长按(完美闪避之后等第二次金 E);
+        - 长按**超时**(0.9s 无金 E, 掉不掉血都一样) -> `_recover_on_daffodill`:
+          切达芙蒂尔上场打一轮, 切人 CD 一好(确认重试自动等)马上切回残虹重打;
+          贴人确认不了 = 角色正被控, 整体重试几次;
+        - 超时次数超过 COMBO_RECOVERY_MAX 才算真状态异常 -> 抛异常停任务
+          (保留 13:07 抓"环合检测坏了"的兜底, 代价变成约 3 轮恢复时间)。
         """
-        damaged = False
         second_gold = require_second_gold
-        for dodges in range(1, self.COMBO_DODGE_RETRY_MAX + 1):
-            result, press_damaged = self._hold_until_gold(
+        timeouts = 0
+        while True:
+            result, _damaged = self._hold_until_gold(
                 interrupt_event=interrupt_event, require_second_gold=second_gold
             )
-            damaged = damaged or press_damaged
             if result is HoldResult.DODGE:
                 if self._recover_from_dodge():
                     return HoldResult.HANDLED
-                damaged = False
                 # "第二次金 E"是完美闪避(闪避攻击 -> 蓄力)特有的; 普通闪避之后
                 # 等的是第一次金 E, 否则会白等一个蓄力周期再撞 1.9s 兜底。
                 second_gold = self._last_dodge_was_perfect
                 continue
             if result is not HoldResult.NO_GOLD:
                 return result
-            if not damaged:
-                # 先复查当前角色: 切人高亮会在切换动画里先跳到目标上(实测 早雾->残虹 误判成
-                # confirmed, 但场上还是早雾), 所以"没掉血也没金 E"先当成切人失败重切,
-                # 只有确认人在残虹身上还不出金 E 才是真异常。
-                if not self._verify_current(self.zankou):
-                    logger.warning(
-                        f"zankou gold E missing and current char is not Zankou "
-                        f"({self.get_current_char(raise_exception=False)}): switch failed, retry"
-                    )
-                    self._switch_to(self.zankou)
-                    damaged = False
-                    continue
-                # 可控状态下长按不出金 E 不可能 -> 直接停任务, 现场留给人工看。
-                # (实测 2026-09-17 13:07 就是这样抓到"环合条检测不准"这个真问题:
-                #  切人后 0.13s 长按, 0.9s 里金 E 全 0 且不掉血。)
+            timeouts += 1
+            if timeouts > self.COMBO_RECOVERY_MAX:
                 self._raise_combo_anomaly(
-                    f"zankou gold E missing while not damaged (hold {self.COMBO_HOLD_MAX}s)"
+                    f"zankou gold E still missing after "
+                    f"{self.COMBO_RECOVERY_MAX} daffodill recoveries"
                 )
             logger.warning(
-                f"zankou gold E missing but damaged, dodge then retry "
-                f"({dodges}/{self.COMBO_DODGE_RETRY_MAX})"
+                f"zankou gold E timeout ({timeouts}/{self.COMBO_RECOVERY_MAX}), "
+                f"recover on daffodill then retry"
             )
-            retry = self._dodge_until_triggered()
-            if retry is DodgeRetry.SUCCESS_REACTION:
-                return HoldResult.HANDLED
-            if retry is DodgeRetry.NOT_TRIGGERED:
-                logger.warning(
-                    f"zankou dodge not confirmed, try again "
-                    f"({dodges}/{self.COMBO_DODGE_RETRY_MAX})"
-                )
-            damaged = False
-        self._raise_combo_anomaly(
-            f"zankou gold E still missing after {self.COMBO_DODGE_RETRY_MAX} dodge attempts"
-        )
+            self._recover_on_daffodill()
+            # 切走又切回来, 闪避攻击/蓄力的上下文已经不在了, 回到等第一次金 E。
+            second_gold = False
+
+    def _recover_on_daffodill(self):
+        """长按超时后的恢复: 切达芙蒂尔上场打一轮, 再切回残虹.
+
+        贴人(切达芙蒂尔)确认不了 = 当前角色大概率被控/切人 CD 没好, 整体重试
+        COMBO_RECOVER_SWITCH_RETRIES 次; 都失败就放弃本轮恢复(返回 False), 让上层
+        计数重试。切回残虹同样走确认重试, 切人 CD 没好时 `_confirm_switch`
+        会自动按到确认为止。
+        """
+        self._set_action_phase("combo_recover_daffodill")
+        if not self._switch_confirmed(self.daffodill):
+            logger.warning("recover switch to daffodill failed, retry the combo directly")
+            return False
+        self._daffodill_window(self.daffodill)
+        self._switch_confirmed(self.zankou)
+        self.sleep(self.SWITCH_SETTLE_TIME)
+        return True
+
+    def _switch_confirmed(self, char, retries=None):
+        """切人 + 图像复查; 确认不了(被控/切人 CD/高亮误报)就整体重试, 都失败返回 False."""
+        if retries is None:
+            retries = self.COMBO_RECOVER_SWITCH_RETRIES
+        for attempt in range(1, retries + 1):
+            self._switch_to(char)
+            if self._verify_current(char):
+                return True
+            logger.warning(
+                f"recover switch to {char} not confirmed ({attempt}/{retries}), retry"
+            )
+            self.sleep(0.2)
+        return False
 
     def _recover_from_dodge(self):
         """长按期间闪避触发后的恢复: 点左键触发闪避反击 -> 等反击动画 -> 重打长按.
@@ -799,45 +805,6 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             logger.info("dodge success reaction took over during the counter wait")
             return True
         return False
-
-    def _dodge_until_triggered(self):
-        """连按闪避(shift)直到听到闪避音, 确认闪避真的触发了.
-
-        角色处于不可控状态时按 shift 不会产生闪避动作音, 所以这个音效就是
-        "闪避是否生效"的判据。
-        普通闪避 -> `TRIGGERED`(上层重打长按); 完美闪避 -> `SUCCESS_REACTION`
-        (现成的成功反击路径已经接管); 限时内什么都没听到 -> `NOT_TRIGGERED`,
-        **不抛异常**: 角色正被连击时闪不出来是正常情况, 交给上层再试几次。
-        """
-        self._set_action_phase("dodge_retry")
-        self._dodge_motion_heard.clear()
-        self._dodge_success_heard.clear()
-        deadline = time.time() + self.DODGE_RETRY_TIMEOUT
-        with self.skip_sleep_checks() as skip:
-            # 只跳战斗检测: 警报音排的闪避(带方向的 d+lshift)要能照常执行,
-            # 它比这里裸按 shift 更容易出完美闪避; 而且它一响这里立刻就知道结果。
-            skip.check_combat = True
-            while time.time() < deadline:
-                self._press_dodge()
-                if self._dodge_success_heard.is_set():
-                    logger.info(
-                        "dodge retry: perfect dodge heard, run the existing dodge-success reaction"
-                    )
-                    SoundCombatContext().discard_pending_action()
-                    self._sound_dodge_success_action()
-                    return DodgeRetry.SUCCESS_REACTION
-                if self._dodge_motion_heard.is_set():
-                    logger.info("dodge retry: dodge motion heard, dodge triggered")
-                    return DodgeRetry.TRIGGERED
-                self.sleep(self.DODGE_RETRY_INTERVAL)
-        logger.warning(
-            f"dodge not confirmed within {self.DODGE_RETRY_TIMEOUT}s while pressing shift"
-        )
-        return DodgeRetry.NOT_TRIGGERED
-
-    def _press_dodge(self):
-        """按一次闪避(shift)."""
-        self.send_key("lshift")
 
     def _health_pixels(self):
         """当前角色血条的红条像素数; None 表示这一帧没取到."""
@@ -1000,9 +967,8 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
             f"health_peak={health_peak}, damaged={damaged})"
         )
         if health_samples == 0:
-            # 一帧血条都没取到 -> 无法证明"没掉血", 走更安全的闪避重试分支
-            logger.warning("zankou health not sampled during hold, assume interrupted")
-            damaged = True
+            # 一帧血条都没取到, 只影响日志定位; 掉血与否不再改变恢复路径
+            logger.warning("zankou health not sampled during hold")
         return HoldResult.NO_GOLD, damaged
 
     def _zankou_double_q(self):
@@ -1406,9 +1372,11 @@ class FourCharComboTask(BaseCombatTask, TriggerTask):
         self._alert_interrupt.set()
 
     def on_dodge_motion_sound(self):
-        """闪避动作音回调(在声音监听线程上): 说明闪避真的触发了."""
+        """闪避动作音回调(在声音监听线程上): 说明闪避真的触发了.
+
+        只更新 `_dodge_heard_at`: 长按循环用它识别"这次长按被闪避打断了"。
+        """
         self._dodge_heard_at = time.time()
-        self._dodge_motion_heard.set()
 
     # ---------------------------------------------------------------- switch
 
