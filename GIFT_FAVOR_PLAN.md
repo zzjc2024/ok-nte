@@ -283,3 +283,30 @@ A 每天送 2 个、B 每天送 3 个 → 该礼物日耗 5 个 → **可撑天�
 - 其余：经验表、特殊礼物不算、无无限礼物、全局 10 次照抄自动赠礼、
   优先级升级成 `gift_id`、粗略粒度记账、天数以计划速率为准、扩展「羁遇赠礼」标签页、
   经验值在采集时 OCR 心形数字并存进礼物目录（老角色用保存帧回填）。
+
+---
+
+## 7. 实施记录
+
+### Step 1（数据模型 v2 + 迁移 + 单测）— 已完成
+
+- `src/gifts/GiftDb.py`：schema 升到 **v2**。
+  - 新增顶层段：`settings`（`protagonist_skill_level` 1-5 / `daily_gift_limit_per_char` /
+    `daily_gift_limit_global`）、`gift_catalog`、`stock`、`stock_snapshot_at`、`ledger`。
+  - profile 新增字段：`priority_gift_ids`、`bond_level`、`bond_exp`、`target_level`、
+    `buy_tier`（限定 100/200/400）、`daily_extra_exp`、`daily_extra_enabled`。
+  - 新增 `normalize_settings` / `normalize_gift_ids` / `normalize_catalog` /
+    `normalize_stock` / `normalize_ledger`；`validate_db` 顺带完成 **v1 -> v2 迁移**
+    （补默认值 + 升版本号，旧 profile 字段原样保留）。
+- `src/gifts/GiftManager.py`：新增 `get_settings` / `update_settings` /
+  `get_catalog` / `upsert_gift` / `get_stock` / `set_stock` / `get_stock_snapshot_at` /
+  `get_ledger` / `record_sent`（按天合并 + 保留最近 `LEDGER_MAX_DAYS=365` 天）；
+  `update_profile` 增加新字段参数；`create_profile` / `recapture_profile` 统一走
+  `normalize_profile`，保证新字段一定有默认值。
+- 单测：新增 `tests/TestGiftDb.py`（11 个：默认库、各段归一化、v1->v2 迁移、
+  读写往返、坏 JSON 恢复）；`tests/TestGiftManager.py` 扩到 17 个（settings / 目录 /
+  库存 / 账本 / 新 profile 字段 / 迁移）。
+- 验证：`py_compile` + `ruff` 通过；`unittest tests.TestGiftDb tests.TestGiftManager`
+  **28 OK**；全量 `discover` **429 OK**（本分支 = 作者最新 + 文档，不含战斗测试）。
+- 备注：`selected_slots` -> `priority_gift_ids` 的换算需要图标模板 + OCR，
+  放到 step 3 用已保存帧回填；step 1 只保留 `selected_slots`、`priority_gift_ids` 默认空。

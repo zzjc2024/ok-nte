@@ -1,4 +1,5 @@
 import importlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -101,3 +102,84 @@ class TestGiftManager(unittest.TestCase):
 
     def test_slot_normalization_and_layout(self):
         self.assertEqual(GiftDb.normalize_slots([0, "1", 0, -1, 10, "bad"]), [0, 1])
+
+    # ------------------------------------------------- v2 settings/catalog/stock/ledger
+
+    def test_settings_round_trip(self):
+        self.assertEqual(self.manager.get_settings(), GiftDb.default_settings())
+        settings = self.manager.update_settings(protagonist_skill_level=5, unknown_key=1)
+        self.assertEqual(settings["protagonist_skill_level"], 5)
+        self.assertNotIn("unknown_key", settings)
+        self.assertEqual(self.manager.get_settings()["protagonist_skill_level"], 5)
+
+    def test_catalog_upsert_keeps_existing_entry(self):
+        self.manager.upsert_gift("gift_a", 400, "票券")
+        self.manager.upsert_gift("gift_a", 400)
+        self.assertEqual(self.manager.get_catalog()["gift_a"], {"exp": 400, "name": "票券"})
+        with self.assertRaises(ValueError):
+            self.manager.upsert_gift("  ", 100)
+
+    def test_stock_snapshot_round_trip(self):
+        self.manager.set_stock({"gift_a": 2, "gift_b": -1}, snapshot_at="2026-09-22T19:56")
+        self.assertEqual(self.manager.get_stock(), {"gift_a": 2, "gift_b": 0})
+        self.assertEqual(self.manager.get_stock_snapshot_at(), "2026-09-22T19:56")
+
+    def test_record_sent_merges_same_day(self):
+        self.manager.record_sent("2026-09-22", {"gift_a": 2}, {"残虹": 3})
+        entry = self.manager.record_sent("2026-09-22", {"gift_a": 1, "gift_b": 1}, {"残虹": 1})
+        self.assertEqual(entry["sent"], {"gift_a": 3, "gift_b": 1})
+        self.assertEqual(entry["characters"], {"残虹": 4})
+        self.assertEqual(self.manager.get_ledger()["2026-09-22"], entry)
+        with self.assertRaises(ValueError):
+            self.manager.record_sent("  ")
+
+    def test_record_sent_prunes_old_days(self):
+        with patch.object(gift_manager_module, "LEDGER_MAX_DAYS", 2):
+            self.manager.record_sent("2026-09-20")
+            self.manager.record_sent("2026-09-21")
+            self.manager.record_sent("2026-09-22")
+        self.assertEqual(sorted(self.manager.get_ledger()), ["2026-09-21", "2026-09-22"])
+
+    # ------------------------------------------------------------- v2 profile fields
+
+    def test_create_profile_fills_v2_defaults(self):
+        profile_id = self.manager.create_profile("角色", np.zeros((20, 30, 3), dtype=np.uint8), [0])
+        profile = self.manager.get_profile(profile_id)
+        self.assertEqual(profile["priority_gift_ids"], [])
+        self.assertEqual(profile["bond_level"], 0)
+        self.assertEqual(profile["target_level"], GiftDb.DEFAULT_TARGET_LEVEL)
+        self.assertEqual(profile["buy_tier"], GiftDb.DEFAULT_BUY_TIER)
+        self.assertFalse(profile["daily_extra_enabled"])
+
+    def test_update_profile_stores_bond_and_priority_fields(self):
+        profile_id = self.manager.create_profile("角色", np.zeros((20, 30, 3), dtype=np.uint8), [0])
+        self.manager.update_profile(
+            profile_id,
+            priority_gift_ids=["gift_a", "gift_a", "gift_b"],
+            bond_level=8,
+            bond_exp=1550,
+            target_level=10,
+            buy_tier=400,
+            daily_extra_exp=200,
+            daily_extra_enabled=True,
+        )
+        profile = self.manager.get_profile(profile_id)
+        self.assertEqual(profile["priority_gift_ids"], ["gift_a", "gift_b"])
+        self.assertEqual(profile["bond_level"], 8)
+        self.assertEqual(profile["bond_exp"], 1550)
+        self.assertEqual(profile["buy_tier"], 400)
+        self.assertTrue(profile["daily_extra_enabled"])
+
+    def test_update_profile_rejects_invalid_buy_tier(self):
+        profile_id = self.manager.create_profile("角色", np.zeros((20, 30, 3), dtype=np.uint8), [0])
+        self.manager.update_profile(profile_id, buy_tier=999)
+        self.assertEqual(self.manager.get_profile(profile_id)["buy_tier"], GiftDb.DEFAULT_BUY_TIER)
+
+    def test_manager_migrates_v1_database(self):
+        GiftManager._instance = None
+        db_path = Path(gift_manager_module.DB_PATH)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.write_text(json.dumps({"schema_version": 1, "profiles": {}}), encoding="utf-8")
+        manager = GiftManager()
+        self.assertEqual(manager.db["schema_version"], GiftDb.DB_SCHEMA_VERSION)
+        self.assertEqual(manager.get_settings(), GiftDb.default_settings())
