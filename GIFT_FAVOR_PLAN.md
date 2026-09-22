@@ -310,3 +310,37 @@ A 每天送 2 个、B 每天送 3 个 → 该礼物日耗 5 个 → **可撑天�
   **28 OK**；全量 `discover` **429 OK**（本分支 = 作者最新 + 文档，不含战斗测试）。
 - 备注：`selected_slots` -> `priority_gift_ids` 的换算需要图标模板 + OCR，
   放到 step 3 用已保存帧回填；step 1 只保留 `selected_slots`、`priority_gift_ids` 默认空。
+
+### Step 2（计算核心 `AffinityCalculator` + 单测）— 已完成
+
+- 新文件 `src/gifts/AffinityCalculator.py`：纯计算层，不依赖 UI / OCR / 截图 / `GiftTask` /
+  `GiftManager` I/O / 游戏进程，只用普通数据结构。
+- 公开 API：
+  - `required_exp_for_level(level)`：n -> n+1 的经验（满级 0）
+  - `required_exp_to_target(current_level, current_exp, target_level)`
+  - `bonus_threshold(skill_level)`：特技 n -> 阈值 n+3（特技 5 -> 8 级）
+  - `gift_exp(base_exp, level, skill_level)`：单件礼物实际经验（含 5%）
+  - `calculate_character_plan(...)` -> `CharacterPlan`
+  - `calculate_multi_character_plan(...)` -> `MultiCharacterPlan`
+  - `calculate_days_to_target(...)` -> `DaysPlan`
+  - `calculate_purchase_need(required_exp, buy_tier, available_exp=0)` -> `PurchaseNeed`
+- 固定语义：
+  - `bond_exp` = **当前等级内已获得经验**（不是累计）；需求 = 经验表求和 - `bond_exp`。
+  - `bond_level` 1-10，`0` = 未设置（多角色规划会跳过该角色）；纯函数对 0/11 等非法值抛 `ValueError`。
+  - `target_level` > 10 夹到 10；<= 当前等级时需求为 0（不产生负需求）。
+  - `daily_extra_exp`（约会）先结算、**不吃 5%**、不消耗库存、不占赠送次数；
+    输出里的 `daily_extra_exp` 是**实际生效**的量（已达标时为 0）。
+- 5% 加成：整数运算 `base * 105 // 100`（向零截断）。当前档位 100/200/400 ×1.05 都是整数，
+  截断与四舍五入结果相同；**游戏实际取整方式尚未确认**，有实测再调。
+  加成按「送礼那一刻的等级」逐件判定，升级跨过阈值后自动失效，且不叠加。
+- 多角色：顺序 = 传入 `profiles` 的顺序（与 `GiftTask` 一致，不按缺口重排）；
+  共享库存按顺序扣减；每角色 `daily_gift_limit_per_char` 次、全局 `daily_gift_limit_global` 次，
+  都取自 `settings`（不硬编码 3/10）。
+- 购买：`calculate_purchase_need` = `ceil((需求 - 库存经验) / 档位)`，库存与购买量分开返回；
+  只按基础经验估算（不含 5%），属保守上界。
+- 单测：新增 `tests/TestAffinityCalculator.py`（43 个，覆盖经验表边界、5% 阈值/跨级/取整、
+  约会经验、优先级顺序、库存不足/刚好/多余、共享库存不重复计、每日/全局次数、购买量）。
+- 验证：`py_compile` + `ruff` 通过；`unittest tests.TestAffinityCalculator` **43 OK**；
+  全量 `discover` **472 OK**（429 + 43）。
+- Step 1 schema 观察（**未改动**）：`bond_level` 默认 0 表示「未设置」，与审查建议的 1-10 有出入；
+  计算器按「0 = 跳过」处理，UI/规划层需把 0 视为未配置。**无阻塞**。
