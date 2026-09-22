@@ -87,6 +87,22 @@ def normalize_gift_ids(value) -> list[str]:
     return gift_ids
 
 
+def normalize_slot_gift_ids(value) -> dict:
+    """``{slot: gift_id}``: 用户给每个礼物格标的礼物身份(键统一成字符串便于 JSON)."""
+    if not isinstance(value, dict):
+        return {}
+    mapping = {}
+    for slot, gift_id in value.items():
+        try:
+            index = int(slot)
+        except (TypeError, ValueError):
+            continue
+        gift_id = str(gift_id).strip()
+        if 0 <= index < 10 and gift_id:
+            mapping[str(index)] = gift_id
+    return mapping
+
+
 def normalize_settings(value) -> dict:
     if not isinstance(value, dict):
         value = {}
@@ -174,6 +190,7 @@ def normalize_profile(profile_id: str, value) -> dict | None:
         "target_count": target_count,
         "enabled": bool(value.get("enabled", True)),
         "priority_gift_ids": normalize_gift_ids(value.get("priority_gift_ids", [])),
+        "slot_gift_ids": normalize_slot_gift_ids(value.get("slot_gift_ids", {})),
         "bond_level": _to_int(value.get("bond_level"), 0, minimum=0, maximum=MAX_LEVEL),
         "bond_exp": _to_int(value.get("bond_exp"), 0, minimum=0),
         "target_level": _to_int(

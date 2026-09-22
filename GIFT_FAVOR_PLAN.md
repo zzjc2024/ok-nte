@@ -114,7 +114,7 @@
 
 v1 库读入时自动补默认值并升版本，`profiles` 原字段不动。
 
-### 4.2 礼物目录：按**图标模板**识别
+### 4.2 礼物目录：按**用户命名**识别（图标模板只做"继承"）
 
 **实测坑**：同一件礼物在不同角色页的**格位不同、首屏可见集合也不同**。
 
@@ -126,13 +126,26 @@ v1 库读入时自动补默认值并升版本，`profiles` 原字段不动。
 
 所以**不能按格位聚合库存**（会少算，且每个角色算出来不一样）。
 
-对策：给礼物建**目录**，用**图标模板**（复用现有 `find_one`）做唯一身份：
-- 读赠礼页时，每格「模板匹配到 `gift_id` + OCR 数量 + OCR 经验值」；
-- 新图标 → 新建目录项；已存在 → 更新库存；
-- 跨角色、跨页都能对上，前后差分才有意义。
+**曾尝试过、已放弃的方案**：纯靠图标自动认身份（感知哈希 / 模板匹配）。
+实测 7 张截图：同一礼物跨 slot/跨行/跨角色，`TM_CCOEFF_NORMED` 得分 0.96~1.00、
+不同礼物 ≤0.69，看着可行；但**白色系礼物（白条/白旗）和很暗的图标（收音机）在图标
+中段细带里区分度不足**，会把两种礼物并成一个（5 种不同特征表示都给出同样错误的聚类）。
+自动化认身份不可靠，所以改成下面的方案。
 
-「刷新库存」就是：截当前赠礼页 → 逐格 upsert 到 `gift_catalog` + `stock`。
-多读几个角色页，目录会自然补全。
+**最终方案（用户命名做身份）**：
+- 在"设置礼物优先级"的地方，用户给这 10 个礼物**分别命名**（也可顺手填经验值）。
+- **名字相同 = 同一种礼物**（`gift_id` 由归一化后的名字派生；归一化只做 Unicode NFKC、
+  去首尾空白、折叠内部空白，**不做**模糊匹配，避免把两种礼物并成一个）。
+- 用户点"更新当前角色"时，程序用**图标模板匹配**给出"建议继承"：
+  新截图某格图标与用户之前标注过的图标很像（≥0.8）→ 建议沿用之前的名称/经验，
+  **最终仍由用户确认**。
+- 因此图标模板只用于"建议"，不承担身份判定；白色系/暗图标即使认错也不影响正确性，
+  用户改名即可。
+
+存储：
+- `gift_catalog: {gift_id: {exp, name}}`（全局，`name` 是用户命名）。
+- `profiles[*].slot_gift_ids: {slot: gift_id}`（每角色每格的标注）。
+- `gift_configs/gift_icons/<gift_id>.png`（已标注礼物的图标，用于下次建议继承）。
 
 ### 4.2.1 礼物的经验值怎么来（当前实现的空白）
 
@@ -344,3 +357,36 @@ A 每天送 2 个、B 每天送 3 个 → 该礼物日耗 5 个 → **可撑天�
   全量 `discover` **472 OK**（429 + 43）。
 - Step 1 schema 观察（**未改动**）：`bond_level` 默认 0 表示「未设置」，与审查建议的 1-10 有出入；
   计算器按「0 = 跳过」处理，UI/规划层需把 0 视为未配置。**无阻塞**。
+
+### Step 3（礼物目录 + 赠礼页读取器 + 单测）— 已完成
+
+方案按用户建议**从"图标自动认身份"改成"用户命名做身份"**（原因见 §4.2 的实测结论）。
+
+- 新增 `src/gifts/GiftIdentity.py`：
+  - `normalize_gift_name(name)` / `gift_id_for_name(name)`：用户命名 -> `gift_id`，
+    同名同 id（只做 NFKC + 去空白 + 折叠空白，不模糊匹配）；空名字返回 `None`。
+  - `match_score(icon, template)` / `suggest_gift_id(icon, templates, threshold)`：
+    图标模板匹配，只用于**建议继承**已有标注（阈值 0.8）。
+  - `GiftIconStore`：`gift_configs/gift_icons/<gift_id>.png` 的读写。
+- 新增 `src/gifts/GiftPageReader.py`：
+  - 纯函数：`parse_bond_progress` / `parse_int` / `parse_gift_counter` / `parse_global_remaining`；
+    `gift_slot_boxes` / `gift_exp_box` / `gift_badge_box` / `special_badge_box` / `crop_region`；
+    `label_slots` / `migrate_priority_gift_ids` / `merge_snapshot_into_catalog` / `gift_ids_for_names`。
+  - 数据结构：`BondReading` / `DailyCountReading` / `GiftSlotReading` / `GiftPageSnapshot`。
+  - `GiftPageReader`（需要 task 提供 OCR / `find_one`）：`read_bond` / `read_counts` /
+    `read_slots` / `suggest_labels` / `learn_labels` / `read`。
+  - **读取失败一律 `None`**，不会用 0 冒充"库存没了/没有经验"。
+- `src/gifts/layout.py`：新增 `bond_level_box` / `bond_progress_box` / `gift_exp_*` /
+  `gift_badge_*` / `daily_banner_box` / `gift_counter_button_box`（用 7 张截图标定过）。
+- `src/gifts/GiftDb.py` / `GiftManager.py`：profile 新增 `slot_gift_ids`
+  （`{slot: gift_id}`，用户标注；`update_profile` 支持写入）。**这是 Step 1 schema 的一处
+  增量扩展**（纯新增字段，v1/v2 旧库读入自动补默认值，向后兼容）。
+- 单测：`tests/TestGiftIdentity.py`（13）、`tests/TestGiftPageReader.py`（30）、
+  `tests/TestGiftScreenshots.py`（7，真实截图回归，缺图自动跳过）。
+- 真实截图回归：`screenshots/gift/`（gitignore，不入库）放 7 张赠礼页截图；
+  以 `8.png` 上标注的「票券/棉花糖/贝壳」为模板，验证在**其它角色页、其它 slot** 上
+  仍能建议成同一礼物（0.96~1.00），且不同礼物不会互相建议。
+- 验证：`py_compile` + `ruff` 通过；礼物相关单测 **81 OK**；全量 `discover` **525 OK**（7 skipped）。
+- 已知限制（**不影响正确性**，因为身份由用户命名决定）：白色系（白条/白旗）与很暗的图标
+  在图标中段细带里区分度不足，自动建议可能认错；用户改名即可。
+- 注意：`screenshots/gift/` 属于用户数据，**不入库**；缺图时相关测试跳过（不会伪造通过）。

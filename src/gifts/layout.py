@@ -25,6 +25,23 @@ class GiftLayout:
     max_sidebar_pages: int = 30
     send_button: tuple[float, float] = (0.713, 0.806)
     counter_box: tuple[float, float, float, float] = (0.646, 0.780, 0.790, 0.840)
+    # 羁遇等级大数字(圆环中心)
+    bond_level_box: tuple[float, float, float, float] = (0.785, 0.195, 0.835, 0.248)
+    # "当前经验/升级需求", 例如 1550/12000
+    bond_progress_box: tuple[float, float, float, float] = (0.755, 0.258, 0.865, 0.295)
+    # 礼物心形经验数字: 位于礼物卡下方, 默认视角只看得见第一排, 需要下滚
+    gift_exp_x_expand: float = 0.008
+    gift_exp_y_offset: float = 0.066
+    gift_exp_height: float = 0.033
+    # 礼物库存角标: 位于图标右下角, 两排默认都可见
+    gift_badge_x_offset: float = 0.030
+    gift_badge_y_offset: float = 0.042
+    gift_badge_width: float = 0.026
+    gift_badge_height: float = 0.030
+    # 底部横幅: "今日还能赠送N次礼物" 或 "该礼物为特殊礼物..."
+    daily_banner_box: tuple[float, float, float, float] = (0.530, 0.680, 0.855, 0.725)
+    # 按钮 "赠送R/L": R=该角色今日剩余次数, L=每角色上限
+    gift_counter_button_box: tuple[float, float, float, float] = (0.625, 0.790, 0.795, 0.825)
 
 
 GIFT_LAYOUT = GiftLayout()

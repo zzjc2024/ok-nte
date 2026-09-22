@@ -259,6 +259,7 @@ class GiftManager:
         display_name=None,
         selected_slots=None,
         priority_gift_ids=None,
+        slot_gift_ids=None,
         bond_level=None,
         bond_exp=None,
         target_level=None,
@@ -280,6 +281,8 @@ class GiftManager:
                 profile["selected_slots"] = self._normalized_slots(selected_slots)
             if priority_gift_ids is not None:
                 profile["priority_gift_ids"] = GiftDb.normalize_gift_ids(priority_gift_ids)
+            if slot_gift_ids is not None:
+                profile["slot_gift_ids"] = GiftDb.normalize_slot_gift_ids(slot_gift_ids)
             if bond_level is not None:
                 profile["bond_level"] = bond_level
             if bond_exp is not None:
