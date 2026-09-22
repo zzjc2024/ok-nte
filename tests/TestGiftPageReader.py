@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from src.gifts.GiftIdentity import GiftIconStore, gift_id_for_name
+from src.gifts.GiftIdentity import GiftIconStore, gift_id_for_name, match_score
 from src.gifts.GiftPageReader import (
     BondReading,
     DailyCountReading,
@@ -47,6 +47,23 @@ def _frame():
         x2, y2 = int(WIDTH * box[2]), int(HEIGHT * box[3])
         frame[y1:y2, x1:x2] = rng.integers(0, 255, (y2 - y1, x2 - x1, 3), dtype=np.uint8)
     return frame
+
+
+def _frame_with_icon_at(source_frame, source_slot, target_slot):
+    """在另一个"角色页"上, 把 ``source_slot`` 的图标放到 ``target_slot``(模拟跨角色/跨格位)."""
+    frame = _frame()
+    icon = crop_region(source_frame, gift_slot_boxes(WIDTH, HEIGHT)[source_slot])
+    box = gift_slot_boxes(WIDTH, HEIGHT)[target_slot]
+    # 与 crop_region 用同一套取整方式, 保证贴回去后与目标格子的裁剪区逐像素一致
+    x1 = int(round(WIDTH * box[0]))
+    y1 = int(round(HEIGHT * box[1]))
+    frame[y1 : y1 + icon.shape[0], x1 : x1 + icon.shape[1]] = icon
+    return frame
+
+
+def _duplicate_icon_frame():
+    """slot 0 与 slot 1 放**完全相同**的图标(用于验证"图像相同也不会自动合并")."""
+    return _frame_with_icon_at(_frame(), 0, 1)
 
 
 class _StubBox:
@@ -301,6 +318,91 @@ class TestGiftPageReader(unittest.TestCase):
 
     def test_gift_id_for_name_used_by_labels(self):
         self.assertEqual(gift_id_for_name("票券"), gift_id_for_name(" 票券 "))
+
+
+class TestIdentityInvariants(unittest.TestCase):
+    """冻结的身份规则: 用户命名决定身份; 图像相似度只提供建议, 绝不自动合并."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.store = GiftIconStore(str(Path(self.temp_dir.name) / "icons"))
+        self.frame = _frame()
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _reader(self, task):
+        return GiftPageReader(task, icon_store=self.store)
+
+    def test_high_similarity_does_not_auto_assign_gift_id(self):
+        """相似度再高, 没有用户确认就只能是建议, gift_id 必须保持 None."""
+        reader = self._reader(_StubTask(self.frame))
+        slots = reader.read_slots(self.frame)
+        reader.learn_labels([replace(slots[0], gift_id=gift_id_for_name("小熊"))])
+
+        snapshot = reader.read(self.frame)  # 没传 slot_gift_ids = 用户还没确认
+        reading = snapshot.slot(0)
+        self.assertEqual(reading.suggested_gift_id, gift_id_for_name("小熊"))
+        self.assertGreaterEqual(reading.match_score, 0.99)
+        self.assertIsNone(reading.gift_id)
+
+    def test_gift_id_is_adopted_only_after_user_confirmation(self):
+        """用户确认后 gift_id == 建议 id, 并可继承该 gift_id 的名称/好感值."""
+        reader = self._reader(_StubTask(self.frame))
+        slots = reader.read_slots(self.frame)
+        reader.learn_labels([replace(slots[0], gift_id=gift_id_for_name("小熊"))])
+        suggested = reader.read(self.frame)
+        self.assertIsNone(suggested.slot(0).gift_id)
+
+        confirmed_id = suggested.slot(0).suggested_gift_id
+        confirmed = label_slots(suggested, {0: confirmed_id})
+        self.assertEqual(confirmed.slot(0).gift_id, confirmed_id)
+        catalog = {confirmed_id: {"name": "小熊", "exp": 100}}
+        self.assertEqual(catalog[confirmed.slot(0).gift_id]["name"], "小熊")
+
+    def test_same_name_across_slots_shares_identity(self):
+        reader = self._reader(_StubTask(self.frame))
+        snapshot = reader.read(
+            self.frame,
+            slot_gift_ids={0: gift_id_for_name("小熊"), 2: gift_id_for_name("小熊")},
+        )
+        self.assertEqual(snapshot.slot(0).gift_id, snapshot.slot(2).gift_id)
+        self.assertEqual(snapshot.slot(0).gift_id, gift_id_for_name("小熊"))
+
+    def test_same_name_across_characters_shares_identity(self):
+        """角色 A 命名过的小熊, 在角色 B 的另一个格位上确认后拿到同一个 gift_id."""
+        name = "小熊"
+        gift_id = gift_id_for_name(name)
+        reader_a = self._reader(_StubTask(self.frame))
+        reader_a.learn_labels([replace(reader_a.read_slots(self.frame)[3], gift_id=gift_id)])
+
+        other_role = _frame_with_icon_at(self.frame, 3, 6)
+        reader_b = self._reader(_StubTask(other_role))
+        suggested = reader_b.suggest_labels(reader_b.read_slots(other_role))
+        self.assertEqual(suggested[6].suggested_gift_id, gift_id)
+
+        confirmed = label_slots(
+            GiftPageSnapshot(slots=suggested), {6: suggested[6].suggested_gift_id}
+        )
+        self.assertEqual(confirmed.slot(6).gift_id, gift_id)
+
+    def test_identical_icons_with_different_names_never_merge(self):
+        """图标完全相同, 但用户命名不同 -> 两个 gift_id, 目录里两条独立记录."""
+        frame = _duplicate_icon_frame()
+        task = _StubTask(frame, _slot_texts(exps={0: 100, 1: 100}))
+        reader = self._reader(task)
+        slots = reader.read_slots(frame)
+        self.assertTrue(np.array_equal(slots[0].icon, slots[1].icon))
+        self.assertGreater(match_score(slots[1].search_icon, slots[0].icon), 0.99)
+
+        labels = {0: gift_id_for_name("小熊"), 1: gift_id_for_name("小熊玩偶")}
+        self.assertNotEqual(labels[0], labels[1])
+        snapshot = label_slots(GiftPageSnapshot(slots=slots), labels)
+        self.assertNotEqual(snapshot.slot(0).gift_id, snapshot.slot(1).gift_id)
+
+        updates, conflicts = merge_snapshot_into_catalog(snapshot, {})
+        self.assertEqual(conflicts, [])
+        self.assertEqual({u.gift_id for u in updates}, set(labels.values()))
 
 
 if __name__ == "__main__":

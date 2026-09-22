@@ -381,12 +381,16 @@ A 每天送 2 个、B 每天送 3 个 → 该礼物日耗 5 个 → **可撑天�
 - `src/gifts/GiftDb.py` / `GiftManager.py`：profile 新增 `slot_gift_ids`
   （`{slot: gift_id}`，用户标注；`update_profile` 支持写入）。**这是 Step 1 schema 的一处
   增量扩展**（纯新增字段，v1/v2 旧库读入自动补默认值，向后兼容）。
-- 单测：`tests/TestGiftIdentity.py`（13）、`tests/TestGiftPageReader.py`（30）、
+- 单测：`tests/TestGiftIdentity.py`（19）、`tests/TestGiftPageReader.py`（35）、
   `tests/TestGiftScreenshots.py`（7，真实截图回归，缺图自动跳过）。
-- 真实截图回归：`screenshots/gift/`（gitignore，不入库）放 7 张赠礼页截图；
+- 身份不变量测试（冻结规则）：同名一定同 id（含 NFKC/去首尾空白）、内部空白折叠但仍有意义、
+  相近名字必须不同 id、高相似度**不**自动赋值 `gift_id`、用户确认后才继承、
+  同 gift_id 跨 slot/跨角色共用身份、**图标完全相同但命名不同也绝不合并**（目录里两条独立记录）。
+- 真实截图回归：`tests/fixtures/gift/`（gitignore，不入库）放 7 张赠礼页截图；
   以 `8.png` 上标注的「票券/棉花糖/贝壳」为模板，验证在**其它角色页、其它 slot** 上
-  仍能建议成同一礼物（0.96~1.00），且不同礼物不会互相建议。
-- 验证：`py_compile` + `ruff` 通过；礼物相关单测 **81 OK**；全量 `discover` **525 OK**（7 skipped）。
+  仍能建议成同一礼物（0.957~1.000，共 21 条有效建议），且不同礼物不会互相建议。
+  **不放 `screenshots/`**：那是工具运行目录，应用每次启动都会清空（见 `src/config.py`）。
+- 验证：`py_compile` + `ruff` 通过；礼物相关单测 **61 OK**；全量 `discover` **533 OK**（7 skipped）。
 - 已知限制（**不影响正确性**，因为身份由用户命名决定）：白色系（白条/白旗）与很暗的图标
   在图标中段细带里区分度不足，自动建议可能认错；用户改名即可。
-- 注意：`screenshots/gift/` 属于用户数据，**不入库**；缺图时相关测试跳过（不会伪造通过）。
+- 注意：`tests/fixtures/gift/` 属于用户数据，**不入库**；缺图时相关测试跳过（不会伪造通过）。

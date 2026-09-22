@@ -1,7 +1,10 @@
 """真实赠礼页截图的本地回归.
 
-截图属于用户数据, **不入库**(``screenshots/`` 已被 .gitignore); 需要时把赠礼页截图
-放到仓库的 ``screenshots/gift/`` 下, 缺失则跳过(不会伪造通过)。
+截图属于用户数据, **不入库**(``tests/fixtures/gift/`` 已被 .gitignore); 需要时把赠礼页
+截图放到该目录下, 缺失则跳过(不会伪造通过)。
+
+**不要**放 ``screenshots/``: 那是工具的运行目录, 应用每次启动都会清空(见
+``src/config.py`` 的 ``screenshots_folder`` 注释)。
 
 验证的是 Step 3 的身份方案: 用户在某个角色页给礼物命名后, **换一个角色页**再采集时,
 图标模板匹配能把这些格子**建议**成同一个礼物(用户确认后即继承名称/经验)。
@@ -28,7 +31,7 @@ REFERENCE_LABELS = {0: "票券", 4: "棉花糖", 5: "贝壳"}
 
 
 def _fixture_dir() -> Path:
-    return Path(__file__).resolve().parent.parent / "screenshots" / "gift"
+    return Path(__file__).resolve().parent / "fixtures" / "gift"
 
 
 def _load_fixtures() -> dict:

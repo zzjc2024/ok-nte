@@ -33,6 +33,21 @@ class TestGiftName(unittest.TestCase):
         self.assertEqual(gift_id_for_name("手写信"), gift_id_for_name("  手写信 "))
         self.assertEqual(gift_id_for_name("ＡＢ"), gift_id_for_name("AB"))
 
+    def test_same_name_same_id_after_strip(self):
+        # 冻结规则: Unicode NFKC + 去首尾空白
+        for name in ("小熊", " 小熊 ", "\t小熊\n", "　小熊　"):
+            self.assertEqual(gift_id_for_name(name), gift_id_for_name("小熊"), repr(name))
+
+    def test_internal_whitespace_collapses_but_stays_significant(self):
+        # 冻结规则: 折叠内部连续空白; 但空格本身有意义(不做模糊匹配)
+        self.assertEqual(gift_id_for_name("小  熊"), gift_id_for_name("小 熊"))
+        self.assertNotEqual(gift_id_for_name("小  熊"), gift_id_for_name("小熊"))
+
+    def test_similar_names_stay_distinct(self):
+        # 名字相近也必须不同 id, 不因为"看起来像"就合并
+        ids = {gift_id_for_name(name) for name in ("小熊", "小熊玩偶", "熊宝宝")}
+        self.assertEqual(len(ids), 3)
+
     def test_different_names_different_ids(self):
         self.assertNotEqual(gift_id_for_name("手写信"), gift_id_for_name("橙礼"))
 
